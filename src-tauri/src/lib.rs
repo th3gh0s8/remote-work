@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use std::fs;
-use std::process;
 use lazy_static::lazy_static;
 use screenshots::Screen;
+use tauri::Emitter;
 
 // Global state to track recording sessions
 lazy_static! {
@@ -19,8 +19,6 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 async fn start_recording(window: tauri::Window) -> Result<String, String> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
 
     // Create a unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -36,6 +34,8 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
         sessions.insert(session_id.clone(), true);
     }
 
+    let session_id_clone = session_id.clone();
+
     // Start recording in a background task
     tokio::spawn(async move {
         let mut frame_count = 0;
@@ -44,7 +44,7 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
         while {
             // Check if recording should continue
             let sessions = RECORDING_SESSIONS.lock().unwrap();
-            let should_continue = *sessions.get(&session_id).unwrap_or(&false);
+            let should_continue = *sessions.get(&session_id_clone).unwrap_or(&false);
             drop(sessions);
             should_continue
         } {
@@ -54,7 +54,7 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
                                 let timestamp = start_time.elapsed().as_millis();
-                                let filename = format!("frame_{}_{}.png", session_id, timestamp);
+                                let filename = format!("frame_{}_{}.png", session_id_clone, timestamp);
                                 let filepath = dir.join(&filename);
 
                                 if let Err(e) = img.save(&filepath) {
@@ -94,7 +94,7 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
 #[tauri::command]
 fn stop_recording() -> Result<String, String> {
     let mut sessions = RECORDING_SESSIONS.lock().map_err(|e| e.to_string())?;
-    for (id, active) in sessions.iter_mut() {
+    for (_id, active) in sessions.iter_mut() {
         if *active {
             *active = false;
         }
