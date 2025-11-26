@@ -169,21 +169,21 @@ fn stop_screenshotting() -> Result<String, String> {
     Ok("Stop signal sent to all screenshotting sessions".to_string())
 }
 
-// Global state to track recording processes
+// Global state to track combined recording status
 use std::process::{Child, Command};
 lazy_static! {
-    static ref RECORDING_PROCESSES: Arc<Mutex<HashMap<String, Child>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref COMBINED_RECORDING_PROCESS: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
 }
 
 #[tauri::command]
-async fn start_recording(window: tauri::Window) -> Result<String, String> {
+async fn start_combined_recording(window: tauri::Window) -> Result<String, String> {
     // Check if there's already a recording in progress
     {
-        let processes = RECORDING_PROCESSES.lock().map_err(|e| e.to_string())?;
-        if !processes.is_empty() {
+        let process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+        if process_guard.is_some() {
             return Err("A recording session is already in progress".to_string());
         }
-        drop(processes);
+        drop(process_guard);
     }
 
     // Create recordings directory
@@ -191,9 +191,8 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
     dir.push("recordings");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Create a unique session ID
+    // Create unique session IDs
     let session_id = uuid::Uuid::new_v4().to_string();
-    let session_id_clone = session_id.clone();
     let video_path = dir.join(format!("recording_{}.mkv", session_id));
     let video_path_str = video_path.to_string_lossy().to_string();
 
@@ -202,19 +201,18 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap())
-        .join("ffmpeg.exe"); // On Windows; would be "ffmpeg" on other platforms
+        .join("ffmpeg.exe");
 
     let ffmpeg_cmd = if ffmpeg_path.exists() {
         ffmpeg_path.to_string_lossy().to_string()
     } else {
         // Check if system FFmpeg is available
         match std::process::Command::new("ffmpeg").arg("-version").output() {
-            Ok(_) => "ffmpeg".to_string(), // System FFmpeg is available
+            Ok(_) => "ffmpeg".to_string(),
             Err(_) => {
                 // Neither bundled nor system FFmpeg found, attempt to download
                 window.emit("recording-progress", "FFmpeg not found, downloading...").unwrap();
 
-                // Download FFmpeg automatically
                 if let Err(e) = download_ffmpeg_bundled(window.clone(), &ffmpeg_path).await {
                     eprintln!("Failed to download FFmpeg: {}", e);
                     return Err("FFmpeg is required for recording but could not be downloaded".to_string());
@@ -226,51 +224,111 @@ async fn start_recording(window: tauri::Window) -> Result<String, String> {
         }
     };
 
-    // Try to start FFmpeg process for direct screen recording
+    // Start the video recording process with FFmpeg
     let mut child = Command::new(&ffmpeg_cmd)
         .args(&[
-            "-f", "gdigrab",  // On Windows, use gdigrab for screen capture
-            "-i", "desktop",  // Capture the entire desktop
-            "-vcodec", "libx264",  // Use H.264 codec
-            "-crf", "28",  // Slightly lower quality for better compatibility
-            "-preset", "ultrafast",  // Use ultrafast for real-time encoding
-            "-pix_fmt", "yuv420p",   // Ensure maximum compatibility
-            "-y",  // Overwrite output file
+            "-f", "gdigrab",
+            "-i", "desktop",
+            "-vcodec", "libx264",
+            "-crf", "28",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-y",
             &video_path_str
         ])
         .spawn()
         .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?;
 
-    // Store the process
+    // Store the recording process
     {
-        let mut processes = RECORDING_PROCESSES.lock().map_err(|e| e.to_string())?;
-        processes.insert(session_id.clone(), child);
+        let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+        *process_guard = Some(child);
     }
 
-    window.emit("recording-started", format!("Started recording session: {}", session_id)).unwrap();
+    window.emit("recording-started", format!("Started combined recording: video + screenshots every 15 minutes")).unwrap();
 
-    // Spawn a task to monitor the recording process
+    // Start the screenshot-taking process in parallel
+    let screenshot_session_id = session_id.clone();
+    let screenshot_window = window.clone();
     tokio::spawn(async move {
-        // Simulate recording progress updates
-        let mut counter = 0;
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            counter += 5;
-            window.emit("recording-progress", format!("Recording in progress... {}s", counter)).unwrap();
+        let start_time = Instant::now();
+        let mut iteration = 0;
 
-            // Check if the process is still running or if it should stop
-            let should_continue = {
-                let processes = RECORDING_PROCESSES.lock().unwrap();
-                processes.contains_key(&session_id)
+        loop {
+            // Check if the recording process is still active
+            let is_active = {
+                let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
+                process_guard.is_some()
             };
 
-            if !should_continue {
-                break; // Stop monitoring if process has been stopped
+            if !is_active {
+                break; // Stop if the recording process has been terminated
             }
+
+            // Take a screenshot
+            match Screen::all() {
+                Ok(screens) => {
+                    if let Some(primary_screen) = screens.first() {
+                        match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
+                            Ok(img) => {
+                                // Create screenshots directory
+                                let mut screenshots_dir = std::env::current_dir().unwrap();
+                                screenshots_dir.push("screenshots");
+                                std::fs::create_dir_all(&screenshots_dir).unwrap();
+
+                                let timestamp = start_time.elapsed().as_millis();
+                                let filename = format!("screenshot_{}_{}.png", screenshot_session_id, timestamp);
+                                let filepath = screenshots_dir.join(&filename);
+
+                                if let Err(e) = img.save(&filepath) {
+                                    eprintln!("Failed to save screenshot: {}", e);
+                                } else {
+                                    screenshot_window.emit("screenshot-taken", format!("Screenshot saved: {}", filename)).unwrap();
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to capture screenshot: {}", e);
+                            }
+                        }
+                    } else {
+                        eprintln!("No screens found for screenshot");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to get screens for screenshot: {}", e);
+                }
+            }
+
+            // Wait for 15 minutes (900 seconds) before taking the next screenshot
+            // But check every second if recording is still active
+            for _ in 0..900 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                let is_active = {
+                    let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
+                    process_guard.is_some()
+                };
+
+                if !is_active {
+                    break; // Exit the waiting loop if recording stopped
+                }
+            }
+
+            // Check again if still active after 15-minute wait
+            let is_active = {
+                let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
+                process_guard.is_some()
+            };
+
+            if !is_active {
+                break; // Exit the main loop if recording stopped
+            }
+
+            iteration += 1;
         }
     });
 
-    Ok(format!("Recording started with session ID: {}", session_id_clone))
+    Ok(format!("Combined recording started: video + screenshots every 15 minutes (Session ID: {})", session_id))
 }
 
 async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -368,36 +426,32 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
 }
 
 #[tauri::command]
-async fn stop_recording(window: tauri::Window) -> Result<String, String> {
-    let mut processes = RECORDING_PROCESSES.lock().map_err(|e| e.to_string())?;
+async fn stop_combined_recording(window: tauri::Window) -> Result<String, String> {
+    let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
 
-    if processes.is_empty() {
+    if process_guard.is_none() {
         return Ok("No recording in progress".to_string());
     }
 
-    // Terminate all recording processes
-    let session_ids: Vec<String> = processes.keys().cloned().collect();
-    for session_id in &session_ids {
-        if let Some(mut child) = processes.get_mut(session_id) {
-            // On Windows, we have to kill the process as there's no graceful way to stop FFmpeg
-            let _ = child.kill(); // Force kill the process
-        }
+    // Kill the recording process
+    if let Some(mut child) = process_guard.as_mut() {
+        let _ = child.kill(); // Force kill the process
     }
 
-    // Clear the process map
-    processes.clear();
+    // Clear the process
+    *process_guard = None;
 
     // Update the UI
-    window.emit("recording-finished", "Recording stopped. Video file is being finalized, please wait a few seconds before opening.").unwrap();
+    window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.").unwrap();
 
-    Ok("Recording stopped. Video file is being finalized, please wait a few seconds before opening.".to_string())
+    Ok("Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, start_screenshotting, stop_screenshotting, start_recording, stop_recording])
+        .invoke_handler(tauri::generate_handler![greet, start_screenshotting, stop_screenshotting, start_combined_recording, stop_combined_recording])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
