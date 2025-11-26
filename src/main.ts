@@ -20,7 +20,7 @@ async function startCombinedRecording() {
   if (recordBtn && stopBtn && screenshotStatus) {
     try {
       recordBtn.disabled = true;
-      screenshotStatus.textContent = "Recording started... Recording video and taking screenshots every 15 minutes";
+      screenshotStatus.textContent = "Remote Worker: Starting...";
 
       // Call the Rust function to start combined recording
       const result = await invoke("start_combined_recording");
@@ -136,4 +136,16 @@ window.addEventListener("DOMContentLoaded", () => {
 
   recordBtn?.addEventListener("click", startCombinedRecording);
   stopBtn?.addEventListener("click", stopCombinedRecording);
+
+  // Listen for progress updates from Rust (just for time display)
+  listen("recording-progress", (event) => {
+    if (typeof event.payload === 'string' && event.payload.includes("Next snapshot in:")) {
+      // Just update the status text with the remaining time
+      const payloadParts = event.payload.split('|');
+      const timePart = payloadParts[0];
+      if (screenshotStatus) {
+        screenshotStatus.textContent = timePart;
+      }
+    }
+  });
 });

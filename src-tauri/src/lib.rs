@@ -245,7 +245,7 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
         *process_guard = Some(child);
     }
 
-    window.emit("recording-started", format!("Started combined recording: video + randomized screenshots (5-30 minutes interval)")).unwrap();
+    window.emit("recording-started", format!("Remote Worker: started")).unwrap();
 
     // Start the screenshot-taking process in parallel
     let screenshot_session_id = session_id.clone();
@@ -276,13 +276,13 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                                 std::fs::create_dir_all(&screenshots_dir).unwrap();
 
                                 let timestamp = start_time.elapsed().as_millis();
-                                let filename = format!("screenshot_{}_{}.png", screenshot_session_id, timestamp);
+                                let filename = format!("snapshot_{}_{}.png", screenshot_session_id, timestamp);
                                 let filepath = screenshots_dir.join(&filename);
 
                                 if let Err(e) = img.save(&filepath) {
-                                    eprintln!("Failed to save screenshot: {}", e);
+                                    eprintln!("Failed to save snapshot: {}", e);
                                 } else {
-                                    screenshot_window.emit("screenshot-taken", format!("Screenshot saved: {}", filename)).unwrap();
+                                    screenshot_window.emit("screenshot-taken", format!("Snapshot saved: {}", filename)).unwrap(); // Note: Keeping event name as screenshot-taken for compatibility
                                 }
                             }
                             Err(e) => {
@@ -290,11 +290,11 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                             }
                         }
                     } else {
-                        eprintln!("No screens found for screenshot");
+                        eprintln!("No screens found for snapshot");
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to get screens for screenshot: {}", e);
+                    eprintln!("Failed to get screens for snapshot: {}", e);
                 }
             }
 
@@ -306,6 +306,7 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
             };
 
             let screenshot_window_clone = screenshot_window.clone();
+            let total_interval = random_interval; // Store the total interval for progress calculation
             // Wait for the random interval before taking the next screenshot
             // But check every second if recording is still active
             for remaining_seconds in (1..=random_interval).rev() {
@@ -314,7 +315,7 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                 // Emit progress update about the remaining time
                 let minutes = remaining_seconds / 60;
                 let seconds = remaining_seconds % 60;
-                screenshot_window_clone.emit("recording-progress", format!("Next screenshot in: {}m {}s", minutes, seconds)).unwrap();
+                screenshot_window_clone.emit("recording-progress", format!("Next snapshot in: {}m {}s", minutes, seconds)).unwrap();
 
                 let is_active = {
                     let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
@@ -338,7 +339,7 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
         }
     });
 
-    Ok(format!("Combined recording started: video + randomized screenshots (5-30 minutes interval) (Session ID: {})", session_id))
+    Ok(format!("Remote Worker: started: (Session ID: {})", session_id))
 }
 
 async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
