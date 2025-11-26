@@ -283,6 +283,10 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                                     eprintln!("Failed to save snapshot: {}", e);
                                 } else {
                                     screenshot_window.emit("screenshot-taken", format!("Snapshot saved: {}", filename)).unwrap(); // Note: Keeping event name as screenshot-taken for compatibility
+                                    // Update user activity since a snapshot was just taken (user is likely active)
+                                    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+                                        *last_activity = SystemTime::now();
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -340,6 +344,73 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
     });
 
     Ok(format!("Remote Worker: started: (Session ID: {})", session_id))
+}
+
+// Global state to track user activity
+use std::time::SystemTime;
+lazy_static! {
+    static ref LAST_USER_ACTIVITY: Arc<Mutex<SystemTime>> = Arc::new(Mutex::new(SystemTime::now()));
+    static ref IDLE_DETECTION_TASK: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+}
+
+#[tauri::command]
+fn update_user_activity() {
+    let mut last_activity = LAST_USER_ACTIVITY.lock().unwrap();
+    *last_activity = SystemTime::now();
+}
+
+#[tauri::command]
+async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
+    // Check if idle detection is already running
+    {
+        let task_guard = IDLE_DETECTION_TASK.lock().map_err(|e| e.to_string())?;
+        if task_guard.is_some() {
+            return Err("Idle detection is already running".to_string());
+        }
+        drop(task_guard);
+    }
+
+    // Start the idle detection task
+    let window_clone = window.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;  // Check every 5 seconds
+
+            if let Ok(last_activity) = LAST_USER_ACTIVITY.lock() {
+                if let Ok(elapsed) = last_activity.elapsed() {
+                    let idle_duration_minutes = elapsed.as_secs() / 60;
+
+                    if idle_duration_minutes >= 5 {  // If idle for 5+ minutes
+                        window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_minutes)).unwrap();
+                    } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds
+                        window_clone.emit("user-idle", format!("User has been idle for {} seconds", elapsed.as_secs())).unwrap();
+                    } else {  // User is active
+                        window_clone.emit("user-active", format!("User active, last activity {} seconds ago", elapsed.as_secs())).unwrap();
+                    }
+                }
+            }
+        }
+    });
+
+    // Store the task handle
+    {
+        let mut task_guard = IDLE_DETECTION_TASK.lock().map_err(|e| e.to_string())?;
+        *task_guard = Some(task);
+    }
+
+    Ok("Idle detection started".to_string())
+}
+
+#[tauri::command]
+async fn stop_idle_detection() -> Result<String, String> {
+    let mut task_guard = IDLE_DETECTION_TASK.lock().map_err(|e| e.to_string())?;
+
+    if let Some(task) = task_guard.take() {
+        // Cancel the task (it will stop when it tries to sleep next)
+        task.abort();
+    }
+
+    Ok("Idle detection stopped".to_string())
 }
 
 async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -462,7 +533,7 @@ async fn stop_combined_recording(window: tauri::Window) -> Result<String, String
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, start_screenshotting, stop_screenshotting, start_combined_recording, stop_combined_recording])
+        .invoke_handler(tauri::generate_handler![greet, start_screenshotting, stop_screenshotting, start_combined_recording, stop_combined_recording, update_user_activity, start_idle_detection, stop_idle_detection])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
