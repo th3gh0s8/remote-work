@@ -245,14 +245,13 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
         *process_guard = Some(child);
     }
 
-    window.emit("recording-started", format!("Started combined recording: video + screenshots every 15 minutes")).unwrap();
+    window.emit("recording-started", format!("Started combined recording: video + randomized screenshots (5-30 minutes interval)")).unwrap();
 
     // Start the screenshot-taking process in parallel
     let screenshot_session_id = session_id.clone();
     let screenshot_window = window.clone();
     tokio::spawn(async move {
         let start_time = Instant::now();
-        let mut iteration = 0;
 
         loop {
             // Check if the recording process is still active
@@ -299,10 +298,23 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                 }
             }
 
-            // Wait for 15 minutes (900 seconds) before taking the next screenshot
+            // Generate a random interval between 5 and 30 minutes in seconds (300 to 1800 seconds)
+            let random_interval: u64 = {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                rng.gen_range(300..=1800) // 5 to 30 minutes in seconds
+            };
+
+            let screenshot_window_clone = screenshot_window.clone();
+            // Wait for the random interval before taking the next screenshot
             // But check every second if recording is still active
-            for _ in 0..900 {
+            for remaining_seconds in (1..=random_interval).rev() {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                // Emit progress update about the remaining time
+                let minutes = remaining_seconds / 60;
+                let seconds = remaining_seconds % 60;
+                screenshot_window_clone.emit("recording-progress", format!("Next screenshot in: {}m {}s", minutes, seconds)).unwrap();
 
                 let is_active = {
                     let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
@@ -323,12 +335,10 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
             if !is_active {
                 break; // Exit the main loop if recording stopped
             }
-
-            iteration += 1;
         }
     });
 
-    Ok(format!("Combined recording started: video + screenshots every 15 minutes (Session ID: {})", session_id))
+    Ok(format!("Combined recording started: video + randomized screenshots (5-30 minutes interval) (Session ID: {})", session_id))
 }
 
 async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
