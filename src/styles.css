@@ -28,6 +28,11 @@
   flex-direction: column;
   justify-content: center;
   text-align: center;
+  min-height: 80vh; /* Ensure container takes at least 80% of viewport height */
+  width: 100%;
+  max-width: 800px; /* Limit max width for larger screens */
+  margin: 0 auto; /* Center the container */
+  padding: 20px; /* Add padding on smaller screens */
 }
 
 .logo {
@@ -44,6 +49,9 @@
 .row {
   display: flex;
   justify-content: center;
+  flex-wrap: wrap; /* Allow wrapping on smaller screens */
+  gap: 10px; /* Add consistent spacing */
+  margin: 10px 0; /* Add vertical spacing */
 }
 
 a {
@@ -93,6 +101,84 @@ button {
 
 #greet-input {
   margin-right: 5px;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .container {
+    padding-top: 5vh;
+    padding: 15px;
+    min-height: 90vh;
+  }
+
+  .logo {
+    height: 4em;
+    padding: 1em;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  input,
+  button {
+    width: 100%;
+    margin: 5px 0;
+    padding: 0.8em 1em;
+  }
+
+  .row {
+    flex-direction: column;
+    align-items: center;
+  }
+}
+
+@media (max-width: 480px) {
+  :root {
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .container {
+    padding: 10px;
+  }
+
+  h1 {
+    font-size: 1.3rem;
+  }
+
+  .logo {
+    height: 3em;
+    padding: 0.8em;
+  }
+
+  input,
+  button {
+    padding: 0.7em 0.9em;
+  }
+}
+
+/* Tablet responsiveness */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .container {
+    max-width: 700px;
+    padding: 25px;
+  }
+
+  h1 {
+    font-size: 1.8rem;
+  }
+}
+
+/* Large screens */
+@media (min-width: 1200px) {
+  .container {
+    max-width: 900px;
+  }
+
+  h1 {
+    font-size: 2.2rem;
+  }
 }
 
 @media (prefers-color-scheme: dark) {

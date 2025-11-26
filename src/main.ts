@@ -37,15 +37,17 @@ async function startCombinedRecording() {
       }
 
       // Show the stop button and hide the record button
-      recordBtn.style.display = "none";
-      stopBtn.style.display = "block";
-      stopBtn.disabled = false; // Ensure stop button is enabled
+      if (recordBtn) recordBtn.style.display = "none";
+      if (stopBtn) {
+        stopBtn.style.display = "block";
+        stopBtn.disabled = false; // Ensure stop button is enabled
+      }
     } catch (error) {
       screenshotStatus.textContent = `Error: ${error}`;
-      recordBtn.disabled = false;
+      if (recordBtn) recordBtn.disabled = false;
       // Show the record button again if there's an error
-      recordBtn.style.display = "block";
-      stopBtn.style.display = "none";
+      if (recordBtn) recordBtn.style.display = "block";
+      if (stopBtn) stopBtn.style.display = "none";
     }
   }
 }
@@ -74,10 +76,12 @@ async function stopCombinedRecording() {
     } finally {
       // Always reset the UI regardless of whether the Rust call succeeded
       // Show the record button and hide the stop button
-      recordBtn.style.display = "block";
-      stopBtn.style.display = "none";
-      stopBtn.disabled = false;
-      recordBtn.disabled = false;  // Ensure button is enabled
+      if (recordBtn) {
+        recordBtn.style.display = "block";
+        recordBtn.disabled = false;  // Ensure button is enabled
+      }
+      if (stopBtn) stopBtn.style.display = "none";
+      if (stopBtn) stopBtn.disabled = false;
     }
   }
 }
@@ -94,11 +98,15 @@ listen("screenshotting-finished", (event) => {
   if (screenshotStatus) {
     screenshotStatus.textContent += ` | ${event.payload}`;
     // Reset buttons after screenshotting is stopped
-    if (screenshotBtn && stopBtn) {
-      screenshotBtn.style.display = "block";
-      stopBtn.style.display = "none";
-      stopBtn.disabled = false;
-      screenshotBtn.disabled = false; // Ensure start button is not disabled
+    if (recordBtn && stopBtn) {
+      if (recordBtn) {
+        recordBtn.style.display = "block";
+        recordBtn.disabled = false; // Ensure start button is not disabled
+      }
+      if (stopBtn) {
+        stopBtn.style.display = "none";
+        stopBtn.disabled = false;
+      }
     }
   }
 });
@@ -121,10 +129,14 @@ listen("recording-finished", (event) => {
     screenshotStatus.textContent = `Recording finished: ${event.payload}`;
     // Reset buttons after recording is stopped
     if (recordBtn && stopBtn) {
-      recordBtn.style.display = "block";
-      stopBtn.style.display = "none";
-      stopBtn.disabled = false;
-      recordBtn.disabled = false; // Ensure start button is not disabled
+      if (recordBtn) {
+        recordBtn.style.display = "block";
+        recordBtn.disabled = false; // Ensure start button is not disabled
+      }
+      if (stopBtn) {
+        stopBtn.style.display = "none";
+        stopBtn.disabled = false;
+      }
     }
   }
 });
