@@ -10,29 +10,36 @@
 
   <body>
     <main class="container">
-      <h1>Remote Worker</h1>
+      <div style="position: relative; width: 100%;">
+        <h1>Remote Worker</h1>
 
-      <div class="row">
-        <a href="https://tauri.app" target="_blank">
-          <img
-            src="/src/assets/tauri.svg"
-            class="logo tauri"
-            alt="Tauri logo"
-          />
-        </a>
+        <div class="row">
+          <a href="https://powersoftt.com/" target="_blank">
+            <img
+              src="/src/assets/Powersoft_logo__1_.png"
+              class="logo"
+              style="height: 50px; width: auto; max-width: 100%;"
+              alt="Powersoft logo"
+            />
+          </a>
+        </div>
+
+        <form class="row" id="greet-form" style="display: none;">
+          <input id="greet-input" placeholder="Enter a name..." />
+          <button type="submit">Greet</button>
+        </form>
+        <p id="greet-msg"></p>
+
+        <div class="row">
+          <button id="record-btn">Start</button>
+          <button id="stop-btn" style="display:none;">Stop</button>
+        </div>
+        <div id="screenshot-status"></div>
+
+        <div id="activity-badge" style="position: absolute; bottom: 10px; left: 10px; width: 20px; height: 20px; border-radius: 50%; border: 2px solid #ccc; background-color: #f44336; box-shadow: 0 0 10px rgba(244, 67, 54, 0.7);">
+          <!-- Bulb effect -->
+        </div>
       </div>
-
-      <form class="row" id="greet-form" style="display: none;">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-
-      <div class="row">
-        <button id="record-btn">Start</button>
-        <button id="stop-btn" style="display:none;">Stop</button>
-      </div>
-      <div id="screenshot-status"></div>
     </main>
   </body>
 </html>
