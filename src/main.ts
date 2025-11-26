@@ -29,9 +29,13 @@ async function startScreenshotting() {
       // Show the stop button and hide the start button
       screenshotBtn.style.display = "none";
       stopBtn.style.display = "block";
+      stopBtn.disabled = false; // Ensure stop button is enabled
     } catch (error) {
       screenshotStatus.textContent = `Error: ${error}`;
       screenshotBtn.disabled = false;
+      // Show the start button again if there's an error
+      screenshotBtn.style.display = "block";
+      stopBtn.style.display = "none";
     }
   }
 }
@@ -46,13 +50,15 @@ async function stopScreenshotting() {
       const result = await invoke("stop_screenshotting");
       screenshotStatus.textContent = result as string;
 
-      // Show the start button and hide the stop button
-      screenshotBtn.style.display = "block";
-      stopBtn.style.display = "none";
     } catch (error) {
       screenshotStatus.textContent = `Error: ${error}`;
     } finally {
+      // Always reset the UI regardless of whether the Rust call succeeded
+      // Show the start button and hide the stop button
+      screenshotBtn.style.display = "block";
+      stopBtn.style.display = "none";
       stopBtn.disabled = false;
+      screenshotBtn.disabled = false; // Ensure start button is enabled
     }
   }
 }
@@ -73,6 +79,7 @@ listen("screenshotting-finished", (event) => {
       screenshotBtn.style.display = "block";
       stopBtn.style.display = "none";
       stopBtn.disabled = false;
+      screenshotBtn.disabled = false; // Ensure start button is not disabled
     }
   }
 });

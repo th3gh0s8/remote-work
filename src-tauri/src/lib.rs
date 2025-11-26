@@ -1,14 +1,14 @@
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant};
 use std::fs;
 use lazy_static::lazy_static;
 use screenshots::Screen;
 use tauri::Emitter;
 
-// Global state to track screenshot sessions
+// Global state to track running screenshot tasks
 lazy_static! {
-    static ref SCREENSHOT_SESSIONS: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref RUNNING_TASKS: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -19,6 +19,21 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
+    // Clean up inactive tasks by removing entries with false value
+    {
+        let mut tasks = RUNNING_TASKS.lock().map_err(|e| e.to_string())?;
+        tasks.retain(|_id, &mut active| active); // Keep only active tasks
+    }
+
+    // Check if there are still any active tasks running
+    {
+        let tasks = RUNNING_TASKS.lock().map_err(|e| e.to_string())?;
+        if !tasks.is_empty() {
+            return Err("A screenshotting session is already running".to_string());
+        }
+        drop(tasks);
+    }
+
     // Create a unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -27,10 +42,10 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
     dir.push("screenshots");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Store session state
+    // Store task state as active
     {
-        let mut sessions = SCREENSHOT_SESSIONS.lock().map_err(|e| e.to_string())?;
-        sessions.insert(session_id.clone(), true);
+        let mut tasks = RUNNING_TASKS.lock().map_err(|e| e.to_string())?;
+        tasks.insert(session_id.clone(), true);
     }
 
     let session_id_clone = session_id.clone();
@@ -39,13 +54,18 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
     tokio::spawn(async move {
         let start_time = Instant::now();
 
-        while {
-            // Check if screenshotting should continue
-            let sessions = SCREENSHOT_SESSIONS.lock().unwrap();
-            let should_continue = *sessions.get(&session_id_clone).unwrap_or(&false);
-            drop(sessions);
-            should_continue
-        } {
+        loop {
+            // Check if stop was requested before taking a screenshot
+            let should_continue = {
+                let tasks = RUNNING_TASKS.lock().unwrap();
+                *tasks.get(&session_id_clone).unwrap_or(&false)
+            };
+
+            if !should_continue {
+                break;
+            }
+
+            // Take screenshot
             match Screen::all() {
                 Ok(screens) => {
                     if let Some(primary_screen) = screens.first() {
@@ -75,12 +95,31 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                 }
             }
 
-            // Wait for 15 minutes (900,000 milliseconds) before taking the next screenshot
-            sleep(Duration::from_secs(15 * 60)).await;
+            // Wait for 15 minutes before taking the next screenshot, but check for stop signal
+            // Wait in 1-second intervals to check the stop flag
+            for _ in 0..(15 * 60) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                // Check if stop was requested
+                let should_continue = {
+                    let tasks = RUNNING_TASKS.lock().unwrap();
+                    *tasks.get(&session_id_clone).unwrap_or(&false)
+                };
+
+                if !should_continue {
+                    break;
+                }
+            }
         }
 
         // Notify completion when stopped
         window.emit("screenshotting-finished", format!("Screenshotting stopped for session: {}", session_id_clone)).unwrap();
+
+        // Remove the task from the running tasks list
+        {
+            let mut tasks = RUNNING_TASKS.lock().unwrap();
+            tasks.remove(&session_id_clone);
+        }
     });
 
     Ok(format!("Started screenshotting session: {} (screenshots will be taken every 15 minutes)", session_id))
@@ -88,13 +127,12 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
 
 #[tauri::command]
 fn stop_screenshotting() -> Result<String, String> {
-    let mut sessions = SCREENSHOT_SESSIONS.lock().map_err(|e| e.to_string())?;
-    for (_id, active) in sessions.iter_mut() {
-        if *active {
-            *active = false;
-        }
+    let mut tasks = RUNNING_TASKS.lock().map_err(|e| e.to_string())?;
+    // Mark all tasks as inactive (this will cause them to stop on next check)
+    for (_id, active) in tasks.iter_mut() {
+        *active = false;
     }
-    Ok("Stopped all screenshotting sessions".to_string())
+    Ok("Stop signal sent to all screenshotting sessions".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
