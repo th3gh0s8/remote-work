@@ -26,3 +26,10 @@ dist-ssr
 # recoding files
 recordings
 screenshots
+
+
+# FFmpeg binaries
+ffmpeg.exe
+ffmpeg
+ffprobe
+*.zip    # To avoid committing temporary zip files
