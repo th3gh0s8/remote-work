@@ -218,4 +218,26 @@ window.addEventListener("DOMContentLoaded", () => {
       }
     }
   });
+
+  // Add keyboard shortcut for admin window (Ctrl+Shift+A)
+  document.addEventListener('keydown', (event) => {
+    if (event.ctrlKey && event.shiftKey && event.key === 'a') {
+      event.preventDefault(); // Prevent default action
+      createAdminWindow();
+    }
+  });
+
+  async function createAdminWindow() {
+    try {
+      // Call Rust function to create admin window
+      await invoke("create_admin_window");
+    } catch (error) {
+      console.error("Error creating admin window:", error);
+    }
+  }
+
+  // Add button event listeners for admin controls
+  const adminWindowBtn = document.querySelector("#admin-window-btn") as HTMLButtonElement;
+
+  adminWindowBtn?.addEventListener("click", createAdminWindow);
 });

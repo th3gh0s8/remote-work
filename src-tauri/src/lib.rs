@@ -6,6 +6,12 @@ use lazy_static::lazy_static;
 use screenshots::Screen;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
+use std::time::SystemTime;
+
+// Windows-specific imports
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 
 #[derive(Clone, PartialEq)]
 enum TaskStatus {
@@ -90,6 +96,8 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
+                                let img = img;
+
                                 let timestamp = start_time.elapsed().as_millis();
                                 let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
                                 let filepath = dir.join(&filename);
@@ -196,7 +204,7 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
     let video_path = dir.join(format!("recording_{}.mkv", session_id));
     let video_path_str = video_path.to_string_lossy().to_string();
 
-    // Look for bundled FFmpeg first, then try system FFmpeg
+    // Look for bundled FFmpeg first
     let ffmpeg_path = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
@@ -207,7 +215,21 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
         ffmpeg_path.to_string_lossy().to_string()
     } else {
         // Check if system FFmpeg is available
-        match std::process::Command::new("ffmpeg").arg("-version").output() {
+        match {
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("ffmpeg")
+                    .arg("-version")
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                    .output()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::process::Command::new("ffmpeg")
+                    .arg("-version")
+                    .output()
+            }
+        } {
             Ok(_) => "ffmpeg".to_string(),
             Err(_) => {
                 // Neither bundled nor system FFmpeg found, attempt to download
@@ -225,19 +247,41 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
     };
 
     // Start the video recording process with FFmpeg
-    let mut child = Command::new(&ffmpeg_cmd)
-        .args(&[
-            "-f", "gdigrab",
-            "-i", "desktop",
-            "-vcodec", "libx264",
-            "-crf", "28",
-            "-preset", "ultrafast",
-            "-pix_fmt", "yuv420p",
-            "-y",
-            &video_path_str
-        ])
-        .spawn()
-        .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?;
+    let child = {
+        #[cfg(target_os = "windows")]
+        {
+            Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "gdigrab",
+                    "-i", "desktop",
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "gdigrab",
+                    "-i", "desktop",
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+    };
 
     // Store the recording process
     {
@@ -270,6 +314,8 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
+                                let img = img;
+
                                 // Create screenshots directory
                                 let mut screenshots_dir = std::env::current_dir().unwrap();
                                 screenshots_dir.push("screenshots");
@@ -310,7 +356,6 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
             };
 
             let screenshot_window_clone = screenshot_window.clone();
-            let total_interval = random_interval; // Store the total interval for progress calculation
             // Wait for the random interval before taking the next screenshot
             // But check every second if recording is still active
             for remaining_seconds in (1..=random_interval).rev() {
@@ -347,10 +392,37 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
 }
 
 // Global state to track user activity
-use std::time::SystemTime;
 lazy_static! {
     static ref LAST_USER_ACTIVITY: Arc<Mutex<SystemTime>> = Arc::new(Mutex::new(SystemTime::now()));
     static ref IDLE_DETECTION_TASK: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+}
+
+
+
+use tauri::Manager;
+
+// Function to create an admin window
+#[tauri::command]
+async fn create_admin_window(app_handle: tauri::AppHandle) -> Result<String, String> {
+    // Check if the window already exists
+    if app_handle.get_webview_window("admin").is_some() {
+        return Ok("Admin window already exists".to_string());
+    }
+
+    // Create a new window with the title "Admin"
+    let _child_window = tauri::webview::WebviewWindowBuilder::new(
+        &app_handle,
+        "admin",
+        tauri::WebviewUrl::App("admin.html".into())
+    )
+    .title("Admin")
+    .inner_size(800.0, 600.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(|e| format!("Failed to create admin window: {}", e))?;
+
+    Ok("Admin window created".to_string())
 }
 
 #[tauri::command]
@@ -435,38 +507,72 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
         }
     };
 
-    // Create HTTP client and initiate download
-    println!("Downloading FFmpeg from: {}", download_url);
+    // Create HTTP client with timeout
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+        .build()?;
 
-    let client = reqwest::Client::new();
-    let response = client.get(download_url).send().await?;
-    let total_size = response.content_length().unwrap_or(0);
-
-    if total_size > 0 {
-        window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0))).unwrap();
-    }
-
-    // Create a temporary file to save the download
+    // Create file paths outside the loop
     let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
-    let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
 
-    // Stream the download with progress tracking
-    let mut downloaded: u64 = 0;
-    let mut stream = response.bytes_stream();
+    // Attempt download with retry logic
+    let mut last_error = None;
+    let mut downloaded_successfully = false;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        temp_file.write_all(&chunk).await?;
-        downloaded += chunk.len() as u64;
+    for attempt in 1..=3 {
+        println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
 
-        if total_size > 0 {
-            let progress = (downloaded as f64 / total_size as f64) * 100.0;
-            window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress)).unwrap();
+        match client.get(download_url).send().await {
+            Ok(response) => {
+                // Download was successful, proceed with saving
+                let total_size = response.content_length().unwrap_or(0);
+
+                if total_size > 0 {
+                    window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0))).unwrap();
+                }
+
+                // Create a temporary file to save the download
+                let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
+
+                // Stream the download with progress tracking
+                let mut downloaded: u64 = 0;
+                let mut stream = response.bytes_stream();
+
+                while let Some(chunk_result) = stream.next().await {
+                    let chunk = chunk_result?;
+                    temp_file.write_all(&chunk).await?;
+                    downloaded += chunk.len() as u64;
+
+                    if total_size > 0 {
+                        let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                        window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress)).unwrap();
+                    }
+                }
+
+                temp_file.flush().await?;
+                drop(temp_file); // Close the file before processing
+                downloaded_successfully = true;
+                break; // Download successful, exit retry loop
+            }
+            Err(e) => {
+                eprintln!("Download attempt {} failed: {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 3 {
+                    // Wait before retrying (but not after the last attempt)
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
         }
     }
 
-    temp_file.flush().await?;
-    drop(temp_file); // Close the file before processing
+    // If all attempts failed, return the last error
+    if !downloaded_successfully {
+        if let Some(error) = last_error {
+            return Err(error.into());
+        } else {
+            return Err("Download failed for unknown reasons".into());
+        }
+    }
 
     // Extract the ZIP file
     let zip_file = std::fs::File::open(&temp_zip_path)?;
@@ -507,6 +613,7 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
     }
 }
 
+
 #[tauri::command]
 async fn stop_combined_recording(window: tauri::Window) -> Result<String, String> {
     let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
@@ -516,7 +623,7 @@ async fn stop_combined_recording(window: tauri::Window) -> Result<String, String
     }
 
     // Kill the recording process
-    if let Some(mut child) = process_guard.as_mut() {
+    if let Some(child) = process_guard.as_mut() {
         let _ = child.kill(); // Force kill the process
     }
 
@@ -533,7 +640,17 @@ async fn stop_combined_recording(window: tauri::Window) -> Result<String, String
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, start_screenshotting, stop_screenshotting, start_combined_recording, stop_combined_recording, update_user_activity, start_idle_detection, stop_idle_detection])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            start_screenshotting,
+            stop_screenshotting,
+            start_combined_recording,
+            stop_combined_recording,
+            update_user_activity,
+            start_idle_detection,
+            stop_idle_detection,
+            create_admin_window
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
