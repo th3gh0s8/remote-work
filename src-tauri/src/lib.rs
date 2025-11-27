@@ -403,7 +403,9 @@ use tauri::Manager;
 
 // Function to create an admin window
 #[tauri::command]
-async fn create_admin_window(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn create_admin_window(window: tauri::Window) -> Result<String, String> {
+    let app_handle = window.app_handle();
+
     // Check if the window already exists
     if app_handle.get_webview_window("admin").is_some() {
         return Ok("Admin window already exists".to_string());
@@ -411,9 +413,32 @@ async fn create_admin_window(app_handle: tauri::AppHandle) -> Result<String, Str
 
     // Create a new window with the title "Admin"
     let _child_window = tauri::webview::WebviewWindowBuilder::new(
-        &app_handle,
+        app_handle,
         "admin",
-        tauri::WebviewUrl::App("admin.html".into())
+        tauri::WebviewUrl::App("src/admin.html".into())
+    )
+    .title("Admin")
+    .inner_size(800.0, 600.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(|e| format!("Failed to create admin window: {}", e))?;
+
+    Ok("Admin window created".to_string())
+}
+
+// Internal function to create admin window that can be called from global shortcut
+async fn create_admin_window_internal(app_handle: &tauri::AppHandle) -> Result<String, String> {
+    // Check if the window already exists
+    if app_handle.get_webview_window("admin").is_some() {
+        return Ok("Admin window already exists".to_string());
+    }
+
+    // Create a new window with the title "Admin"
+    let _child_window = tauri::webview::WebviewWindowBuilder::new(
+        app_handle,
+        "admin",
+        tauri::WebviewUrl::App("src/admin.html".into())
     )
     .title("Admin")
     .inner_size(800.0, 600.0)
@@ -640,6 +665,21 @@ async fn stop_combined_recording(window: tauri::Window) -> Result<String, String
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin({
+            let shortcut_builder = tauri_plugin_global_shortcut::Builder::new();
+            let shortcut_builder = shortcut_builder.with_shortcuts(["Ctrl+Shift+`"].iter().cloned()).expect("Failed to register global shortcut");
+            shortcut_builder
+                .with_handler(move |app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        // Open admin window when the global shortcut is pressed
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = create_admin_window_internal(&app_handle).await;
+                        });
+                    }
+                })
+                .build()
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             start_screenshotting,

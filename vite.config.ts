@@ -27,4 +27,13 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  // Configure multiple HTML entries for multi-page app
+  build: {
+    rollupOptions: {
+      input: {
+        main: './index.html',
+        admin: './src/admin.html'
+      }
+    }
+  }
 }));

@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
 tray-icon = "0.13"
 once_cell = "1.19"
 image = { version = "0.24.7", features = ["png"] }
