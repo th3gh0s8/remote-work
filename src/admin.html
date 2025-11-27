@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Admin</title>
+    <title>Admin Panel</title>
     <style>
       body {
         font-family: sans-serif;
@@ -13,7 +13,7 @@
       }
 
       .container {
-        max-width: 600px;
+        max-width: 800px;
         margin: 0 auto;
         background: white;
         padding: 30px;
@@ -24,6 +24,7 @@
       h1 {
         color: #d32f2f;
         text-align: center;
+        margin-top: 0;
       }
 
       .warning {
@@ -42,7 +43,7 @@
         text-align: center;
       }
 
-      .exclusion-section {
+      .section {
         margin-top: 30px;
         padding: 20px;
         background-color: #f8f9fa;
@@ -50,7 +51,7 @@
         border: 1px solid #e9ecef;
       }
 
-      .exclusion-section h2 {
+      .section h2 {
         color: #495057;
         font-size: 1.2em;
         margin-top: 0;
@@ -67,7 +68,9 @@
         color: #495057;
       }
 
-      input[type="text"] {
+      input[type="text"],
+      input[type="number"],
+      select {
         width: 100%;
         padding: 8px 12px;
         border: 1px solid #ced4da;
@@ -98,6 +101,14 @@
 
       button.remove:hover {
         background-color: #c82333;
+      }
+
+      button.secondary {
+        background-color: #6c757d;
+      }
+
+      button.secondary:hover {
+        background-color: #5a6268;
       }
 
       .window-list {
@@ -140,6 +151,22 @@
         color: #721c24;
         border: 1px solid #f5c6cb;
       }
+
+      .recording-options {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 15px;
+      }
+
+      .option-group {
+        margin-bottom: 15px;
+      }
+
+      .option-group label {
+        display: inline;
+        margin-left: 8px;
+        font-weight: normal;
+      }
     </style>
   </head>
   <body>
@@ -150,9 +177,54 @@
         <strong>Warning:</strong> This window is hidden from screenshots for privacy.
       </div>
 
-      <p>This is a private admin panel that will be automatically excluded from screen captures.</p>
+      <p>This is a private admin panel with controls for recording and screenshot settings.</p>
 
-      <div class="exclusion-section">
+      <div class="section">
+        <h2>Recording & Screenshot Options</h2>
+        <p>Configure how recordings and screenshots are captured.</p>
+
+        <div class="recording-options">
+          <div class="option-group">
+            <input type="checkbox" id="record-audio" checked>
+            <label for="record-audio">Record system audio</label>
+          </div>
+
+          <div class="option-group">
+            <input type="checkbox" id="record-webcam" checked>
+            <label for="record-webcam">Include webcam feed</label>
+          </div>
+
+          <div class="option-group">
+            <input type="checkbox" id="hide-cursor" checked>
+            <label for="hide-cursor">Hide cursor in recordings</label>
+          </div>
+
+          <div class="option-group">
+            <input type="checkbox" id="auto-save" checked>
+            <label for="auto-save">Auto-save recordings</label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="screenshot-interval">Screenshot Interval (minutes):</label>
+          <input type="number" id="screenshot-interval" min="1" max="60" value="15">
+        </div>
+
+        <div class="form-group">
+          <label for="recording-quality">Recording Quality:</label>
+          <select id="recording-quality">
+            <option value="low">Low (faster, smaller files)</option>
+            <option value="medium" selected>Medium (balanced)</option>
+            <option value="high">High (better quality)</option>
+            <option value="lossless">Lossless (largest files)</option>
+          </select>
+        </div>
+
+        <button id="save-options-btn" class="secondary">Save Options</button>
+        <button id="reset-options-btn">Reset to Defaults</button>
+      </div>
+
+      <div class="section">
         <h2>Window Exclusion Management</h2>
         <p>Add or remove window titles from the exclusion list to control which windows are hidden during recordings and screenshots.</p>
 
@@ -172,6 +244,26 @@
         </div>
       </div>
 
+      <div class="section">
+        <h2>System Status</h2>
+        <p>Monitor the application status and performance.</p>
+
+        <div class="recording-options">
+          <div class="option-group">
+            <label>Recording Status:</label>
+            <div id="recording-status">Not Recording</div>
+          </div>
+          <div class="option-group">
+            <label>Storage Used:</label>
+            <div id="storage-used">0 MB</div>
+          </div>
+          <div class="option-group">
+            <label>Active Sessions:</label>
+            <div id="active-sessions">0</div>
+          </div>
+        </div>
+      </div>
+
       <div class="info">
         <p>Press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>`</kbd> (backtick) to open this window again.</p>
       </div>
@@ -186,6 +278,21 @@
       const refreshListBtn = document.getElementById('refresh-list-btn');
       const excludedWindowsList = document.getElementById('excluded-windows-list');
       const statusMessage = document.getElementById('status-message');
+
+      // Recording options elements
+      const saveOptionsBtn = document.getElementById('save-options-btn');
+      const resetOptionsBtn = document.getElementById('reset-options-btn');
+      const screenshotInterval = document.getElementById('screenshot-interval');
+      const recordingQuality = document.getElementById('recording-quality');
+      const recordAudio = document.getElementById('record-audio');
+      const recordWebcam = document.getElementById('record-webcam');
+      const hideCursor = document.getElementById('hide-cursor');
+      const autoSave = document.getElementById('auto-save');
+
+      // Status elements
+      const recordingStatus = document.getElementById('recording-status');
+      const storageUsed = document.getElementById('storage-used');
+      const activeSessions = document.getElementById('active-sessions');
 
       // Show status message
       function showStatus(message, isSuccess = true) {
@@ -239,6 +346,62 @@
         }
       }
 
+      // Load recording options from storage (placeholder function)
+      function loadOptions() {
+        // In a real implementation, this would fetch from persistent storage
+        // For now, using defaults
+        const options = JSON.parse(localStorage.getItem('recordingOptions') || '{}');
+
+        if (options.screenshotInterval) {
+          screenshotInterval.value = options.screenshotInterval;
+        }
+
+        if (options.recordingQuality) {
+          recordingQuality.value = options.recordingQuality;
+        }
+
+        recordAudio.checked = options.recordAudio !== undefined ? options.recordAudio : true;
+        recordWebcam.checked = options.recordWebcam !== undefined ? options.recordWebcam : true;
+        hideCursor.checked = options.hideCursor !== undefined ? options.hideCursor : true;
+        autoSave.checked = options.autoSave !== undefined ? options.autoSave : true;
+      }
+
+      // Save recording options to storage
+      function saveOptions() {
+        const options = {
+          screenshotInterval: parseInt(screenshotInterval.value),
+          recordingQuality: recordingQuality.value,
+          recordAudio: recordAudio.checked,
+          recordWebcam: recordWebcam.checked,
+          hideCursor: hideCursor.checked,
+          autoSave: autoSave.checked
+        };
+
+        localStorage.setItem('recordingOptions', JSON.stringify(options));
+        showStatus('Options saved successfully!');
+      }
+
+      // Reset options to defaults
+      function resetOptions() {
+        screenshotInterval.value = 15;
+        recordingQuality.value = 'medium';
+        recordAudio.checked = true;
+        recordWebcam.checked = true;
+        hideCursor.checked = true;
+        autoSave.checked = true;
+
+        localStorage.removeItem('recordingOptions');
+        showStatus('Options reset to defaults!');
+      }
+
+      // Update status information (placeholder function)
+      function updateStatus() {
+        // In a real implementation, this would fetch actual status from the backend
+        recordingStatus.textContent = Math.random() > 0.7 ? 'Recording' : 'Not Recording';
+        storageUsed.textContent = Math.floor(Math.random() * 5000) + ' MB';
+        activeSessions.textContent = Math.floor(Math.random() * 5) + ' active';
+      }
+
       // Add event listeners
       addWindowBtn.addEventListener('click', async () => {
         const windowTitle = windowTitleInput.value.trim();
@@ -260,8 +423,18 @@
 
       refreshListBtn.addEventListener('click', populateExcludedWindowsList);
 
-      // Load the initial list when the page loads
-      document.addEventListener('DOMContentLoaded', populateExcludedWindowsList);
+      saveOptionsBtn.addEventListener('click', saveOptions);
+      resetOptionsBtn.addEventListener('click', resetOptions);
+
+      // Initialize the page
+      document.addEventListener('DOMContentLoaded', () => {
+        loadOptions();
+        populateExcludedWindowsList();
+        updateStatus();
+
+        // Update status periodically
+        setInterval(updateStatus, 5000);
+      });
     </script>
   </body>
 </html>
