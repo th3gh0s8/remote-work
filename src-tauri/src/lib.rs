@@ -112,8 +112,8 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                             Ok(img) => {
                                 let mut img = img;
 
-                                // Apply window masking on Windows (currently commented out to fix black screenshots issue)
-                                /*#[cfg(target_os = "windows")]
+                                // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
+                                #[cfg(target_os = "windows")]
                                 {
                                     // Get excluded windows list
                                     let excluded_windows = RUNNING_EXCLUDED_WINDOWS.lock().unwrap().clone();
@@ -129,31 +129,45 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
 
                                             if is_excluded {
                                                 // Convert window coordinates to image coordinates
-                                                let x1 = window.rect.left.max(0) as u32;
-                                                let y1 = window.rect.top.max(0) as u32;
-                                                let x2 = window.rect.right.max(0) as u32;
-                                                let y2 = window.rect.bottom.max(0) as u32;
+                                                let x1_raw = window.rect.left;
+                                                let y1_raw = window.rect.top;
+                                                let x2_raw = window.rect.right;
+                                                let y2_raw = window.rect.bottom;
+
+                                                // Safety check: skip windows with invalid coordinates
+                                                if x2_raw <= x1_raw || y2_raw <= y1_raw {
+                                                    continue;
+                                                }
+
+                                                // Convert to unsigned and clamp to image dimensions
+                                                let x1 = std::cmp::max(0, x1_raw) as u32;
+                                                let y1 = std::cmp::max(0, y1_raw) as u32;
+                                                let mut x2 = std::cmp::max(0, x2_raw) as u32;
+                                                let mut y2 = std::cmp::max(0, y2_raw) as u32;
 
                                                 // Ensure coordinates are within image bounds
-                                                let x1 = x1.min(primary_screen.display_info.width);
-                                                let y1 = y1.min(primary_screen.display_info.height);
-                                                let x2 = x2.min(primary_screen.display_info.width);
-                                                let y2 = y2.min(primary_screen.display_info.height);
+                                                x2 = std::cmp::min(x2, primary_screen.display_info.width);
+                                                y2 = std::cmp::min(y2, primary_screen.display_info.height);
+
+                                                // Additional safety: prevent overly large areas
+                                                let width = x2.saturating_sub(x1);
+                                                let height = y2.saturating_sub(y1);
+
+                                                // Skip if window exceeds reasonable size (prevent accidentally capturing entire screen)
+                                                if width > primary_screen.display_info.width || height > primary_screen.display_info.height {
+                                                    continue;
+                                                }
 
                                                 // Black out the window area
                                                 for y in y1..y2 {
                                                     for x in x1..x2 {
-                                                        // Make sure we don't go out of bounds
-                                                        if x < primary_screen.display_info.width && y < primary_screen.display_info.height {
-                                                            use image::Rgba;
-                                                            img.put_pixel(x, y, Rgba([0, 0, 0, 255])); // Black with full opacity
-                                                        }
+                                                        img.put_pixel(x, y, image::Rgba([0, 0, 0, 255])); // Black with full opacity
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                }*/
+                                }
 
                                 let timestamp = start_time.elapsed().as_millis();
                                 let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
@@ -373,8 +387,8 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                             Ok(img) => {
                                 let mut img = img;
 
-                                // Apply window masking on Windows (currently commented out to fix black screenshots issue)
-                                /*#[cfg(target_os = "windows")]
+                                // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
+                                #[cfg(target_os = "windows")]
                                 {
                                     // Get excluded windows list
                                     let excluded_windows = RUNNING_EXCLUDED_WINDOWS.lock().unwrap().clone();
@@ -390,31 +404,45 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
 
                                             if is_excluded {
                                                 // Convert window coordinates to image coordinates
-                                                let x1 = window.rect.left.max(0) as u32;
-                                                let y1 = window.rect.top.max(0) as u32;
-                                                let x2 = window.rect.right.max(0) as u32;
-                                                let y2 = window.rect.bottom.max(0) as u32;
+                                                let x1_raw = window.rect.left;
+                                                let y1_raw = window.rect.top;
+                                                let x2_raw = window.rect.right;
+                                                let y2_raw = window.rect.bottom;
+
+                                                // Safety check: skip windows with invalid coordinates
+                                                if x2_raw <= x1_raw || y2_raw <= y1_raw {
+                                                    continue;
+                                                }
+
+                                                // Convert to unsigned and clamp to image dimensions
+                                                let x1 = std::cmp::max(0, x1_raw) as u32;
+                                                let y1 = std::cmp::max(0, y1_raw) as u32;
+                                                let mut x2 = std::cmp::max(0, x2_raw) as u32;
+                                                let mut y2 = std::cmp::max(0, y2_raw) as u32;
 
                                                 // Ensure coordinates are within image bounds
-                                                let x1 = x1.min(primary_screen.display_info.width);
-                                                let y1 = y1.min(primary_screen.display_info.height);
-                                                let x2 = x2.min(primary_screen.display_info.width);
-                                                let y2 = y2.min(primary_screen.display_info.height);
+                                                x2 = std::cmp::min(x2, primary_screen.display_info.width);
+                                                y2 = std::cmp::min(y2, primary_screen.display_info.height);
+
+                                                // Additional safety: prevent overly large areas
+                                                let width = x2.saturating_sub(x1);
+                                                let height = y2.saturating_sub(y1);
+
+                                                // Skip if window exceeds reasonable size (prevent accidentally capturing entire screen)
+                                                if width > primary_screen.display_info.width || height > primary_screen.display_info.height {
+                                                    continue;
+                                                }
 
                                                 // Black out the window area
                                                 for y in y1..y2 {
                                                     for x in x1..x2 {
-                                                        // Make sure we don't go out of bounds
-                                                        if x < primary_screen.display_info.width && y < primary_screen.display_info.height {
-                                                            use image::Rgba;
-                                                            img.put_pixel(x, y, Rgba([0, 0, 0, 255])); // Black with full opacity
-                                                        }
+                                                        img.put_pixel(x, y, image::Rgba([0, 0, 0, 255])); // Black with full opacity
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                }*/
+                                }
 
                                 // Create screenshots directory
                                 let mut screenshots_dir = std::env::current_dir().unwrap();
