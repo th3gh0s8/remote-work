@@ -36,5 +36,6 @@ lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 rand = "0.8"
 windows = "0.52"
+winapi = { version = "0.3", features = ["winuser", "windef", "minwindef", "libloaderapi", "processthreadsapi"] }
 
 
