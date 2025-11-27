@@ -6,11 +6,25 @@ use lazy_static::lazy_static;
 use screenshots::Screen;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
+use image::Rgba;
 use std::time::SystemTime;
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use {
+    winapi::{
+        shared::{
+            windef::{HWND, RECT},
+            minwindef::{LPARAM, BOOL, TRUE, FALSE},
+        },
+        um::{
+            winuser::{EnumWindows, GetWindowTextW, GetWindowRect, IsWindowVisible, IsIconic},
+        },
+    },
+    std::ffi::OsString,
+    std::os::windows::ffi::OsStringExt,
+    std::os::windows::process::CommandExt,
+};
 
 
 #[derive(Clone, PartialEq)]
@@ -96,7 +110,50 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
+
+                                // Apply window masking on Windows (currently commented out to fix black screenshots issue)
+                                /*#[cfg(target_os = "windows")]
+                                {
+                                    // Get excluded windows list
+                                    let excluded_windows = RUNNING_EXCLUDED_WINDOWS.lock().unwrap().clone();
+
+                                    // Get visible windows to mask
+                                    if let Ok(windows_to_mask) = crate::windows_utils::get_visible_windows() {
+                                        for window in windows_to_mask {
+                                            let window_title_lower = window.title.to_lowercase();
+
+                                            let is_excluded = excluded_windows.iter().any(|keyword| {
+                                                window_title_lower.contains(keyword)
+                                            });
+
+                                            if is_excluded {
+                                                // Convert window coordinates to image coordinates
+                                                let x1 = window.rect.left.max(0) as u32;
+                                                let y1 = window.rect.top.max(0) as u32;
+                                                let x2 = window.rect.right.max(0) as u32;
+                                                let y2 = window.rect.bottom.max(0) as u32;
+
+                                                // Ensure coordinates are within image bounds
+                                                let x1 = x1.min(primary_screen.display_info.width);
+                                                let y1 = y1.min(primary_screen.display_info.height);
+                                                let x2 = x2.min(primary_screen.display_info.width);
+                                                let y2 = y2.min(primary_screen.display_info.height);
+
+                                                // Black out the window area
+                                                for y in y1..y2 {
+                                                    for x in x1..x2 {
+                                                        // Make sure we don't go out of bounds
+                                                        if x < primary_screen.display_info.width && y < primary_screen.display_info.height {
+                                                            use image::Rgba;
+                                                            img.put_pixel(x, y, Rgba([0, 0, 0, 255])); // Black with full opacity
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }*/
 
                                 let timestamp = start_time.elapsed().as_millis();
                                 let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
@@ -314,7 +371,50 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
+
+                                // Apply window masking on Windows (currently commented out to fix black screenshots issue)
+                                /*#[cfg(target_os = "windows")]
+                                {
+                                    // Get excluded windows list
+                                    let excluded_windows = RUNNING_EXCLUDED_WINDOWS.lock().unwrap().clone();
+
+                                    // Get visible windows to mask
+                                    if let Ok(windows_to_mask) = crate::windows_utils::get_visible_windows() {
+                                        for window in windows_to_mask {
+                                            let window_title_lower = window.title.to_lowercase();
+
+                                            let is_excluded = excluded_windows.iter().any(|keyword| {
+                                                window_title_lower.contains(keyword)
+                                            });
+
+                                            if is_excluded {
+                                                // Convert window coordinates to image coordinates
+                                                let x1 = window.rect.left.max(0) as u32;
+                                                let y1 = window.rect.top.max(0) as u32;
+                                                let x2 = window.rect.right.max(0) as u32;
+                                                let y2 = window.rect.bottom.max(0) as u32;
+
+                                                // Ensure coordinates are within image bounds
+                                                let x1 = x1.min(primary_screen.display_info.width);
+                                                let y1 = y1.min(primary_screen.display_info.height);
+                                                let x2 = x2.min(primary_screen.display_info.width);
+                                                let y2 = y2.min(primary_screen.display_info.height);
+
+                                                // Black out the window area
+                                                for y in y1..y2 {
+                                                    for x in x1..x2 {
+                                                        // Make sure we don't go out of bounds
+                                                        if x < primary_screen.display_info.width && y < primary_screen.display_info.height {
+                                                            use image::Rgba;
+                                                            img.put_pixel(x, y, Rgba([0, 0, 0, 255])); // Black with full opacity
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }*/
 
                                 // Create screenshots directory
                                 let mut screenshots_dir = std::env::current_dir().unwrap();
@@ -395,11 +495,109 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
 lazy_static! {
     static ref LAST_USER_ACTIVITY: Arc<Mutex<SystemTime>> = Arc::new(Mutex::new(SystemTime::now()));
     static ref IDLE_DETECTION_TASK: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+
+    // Global state to track excluded window titles
+    static ref EXCLUDED_WINDOWS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![
+        "password".to_lowercase(),
+        "key".to_lowercase(),
+        "secret".to_lowercase(),
+        "private".to_lowercase(),
+        "personal".to_lowercase(),
+        "settings".to_lowercase(),
+        "options".to_lowercase(),
+    ]));
 }
+
+// Global variable to access excluded windows during capture
+#[cfg(target_os = "windows")]
+use EXCLUDED_WINDOWS as RUNNING_EXCLUDED_WINDOWS;
 
 
 
 use tauri::Manager;
+
+#[cfg(target_os = "windows")]
+mod windows_utils {
+    use super::*;
+
+    pub struct WindowInfo {
+        pub title: String,
+        pub rect: RECT,
+    }
+
+    pub fn get_visible_windows() -> Result<Vec<WindowInfo>, Box<dyn std::error::Error>> {
+        let mut windows = Vec::new();
+        let windows_ptr = &mut windows as *mut Vec<WindowInfo>;
+
+        unsafe {
+            EnumWindows(Some(enum_windows_proc), windows_ptr as LPARAM);
+        }
+
+        Ok(windows)
+    }
+
+    unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let windows: &mut Vec<WindowInfo> = &mut *(lparam as *mut Vec<WindowInfo>);
+
+        if IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 {
+            let mut buf = [0u16; 256];
+            GetWindowTextW(hwnd, buf.as_mut_ptr(), 256);
+
+            let title = OsString::from_wide(&buf[..buf.iter().position(|&x| x == 0).unwrap_or(buf.len())])
+                .to_string_lossy()
+                .to_string();
+
+            // Only include windows with non-empty titles
+            if !title.is_empty() {
+                let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                if GetWindowRect(hwnd, &mut rect) != 0 {  // GetWindowRect returns BOOL (non-zero for success)
+                    windows.push(WindowInfo {
+                        title,
+                        rect,
+                    });
+                }
+            }
+        }
+
+        TRUE  // Continue enumeration
+    }
+
+}
+
+// Function to add excluded window keywords
+#[tauri::command]
+fn add_excluded_window(window_title: String) -> Result<String, String> {
+    let mut excluded_windows = EXCLUDED_WINDOWS.lock().map_err(|e| e.to_string())?;
+    let lower_title = window_title.to_lowercase();
+
+    if !excluded_windows.contains(&lower_title) {
+        excluded_windows.push(lower_title);
+        Ok(format!("Added '{}' to excluded windows list", window_title))
+    } else {
+        Ok(format!("'{}' is already in the excluded windows list", window_title))
+    }
+}
+
+// Function to remove excluded window keywords
+#[tauri::command]
+fn remove_excluded_window(window_title: String) -> Result<String, String> {
+    let mut excluded_windows = EXCLUDED_WINDOWS.lock().map_err(|e| e.to_string())?;
+    let lower_title = window_title.to_lowercase();
+
+    if excluded_windows.contains(&lower_title) {
+        excluded_windows.retain(|x| *x != lower_title);
+        Ok(format!("Removed '{}' from excluded windows list", window_title))
+    } else {
+        Ok(format!("'{}' was not found in the excluded windows list", window_title))
+    }
+}
+
+// Function to get current excluded windows
+#[tauri::command]
+fn get_excluded_windows() -> Result<Vec<String>, String> {
+    let excluded_windows = EXCLUDED_WINDOWS.lock().map_err(|e| e.to_string())?;
+    Ok(excluded_windows.clone())
+}
 
 // Function to create an admin window
 #[tauri::command]
@@ -411,27 +609,13 @@ async fn create_admin_window(window: tauri::Window) -> Result<String, String> {
         return Ok("Admin window already exists".to_string());
     }
 
-    // Create a new window with the title "Admin"
-    let _child_window = tauri::webview::WebviewWindowBuilder::new(
-        app_handle,
-        "admin",
-        tauri::WebviewUrl::App("src/admin.html".into())
-    )
-    .title("Admin")
-    .inner_size(800.0, 600.0)
-    .resizable(true)
-    .center()
-    .build()
-    .map_err(|e| format!("Failed to create admin window: {}", e))?;
-
-    Ok("Admin window created".to_string())
-}
-
-// Internal function to create admin window that can be called from global shortcut
-async fn create_admin_window_internal(app_handle: &tauri::AppHandle) -> Result<String, String> {
-    // Check if the window already exists
-    if app_handle.get_webview_window("admin").is_some() {
-        return Ok("Admin window already exists".to_string());
+    // Add "admin" to the excluded windows list to ensure it's blacked out in recordings
+    {
+        let mut excluded_windows = EXCLUDED_WINDOWS.lock().map_err(|e| e.to_string())?;
+        let admin_keyword = "admin".to_lowercase();
+        if !excluded_windows.contains(&admin_keyword) {
+            excluded_windows.push(admin_keyword);
+        }
     }
 
     // Create a new window with the title "Admin"
@@ -447,7 +631,39 @@ async fn create_admin_window_internal(app_handle: &tauri::AppHandle) -> Result<S
     .build()
     .map_err(|e| format!("Failed to create admin window: {}", e))?;
 
-    Ok("Admin window created".to_string())
+    Ok("Admin window created and added to exclusion list".to_string())
+}
+
+// Internal function to create admin window that can be called from global shortcut
+async fn create_admin_window_internal(app_handle: &tauri::AppHandle) -> Result<String, String> {
+    // Check if the window already exists
+    if app_handle.get_webview_window("admin").is_some() {
+        return Ok("Admin window already exists".to_string());
+    }
+
+    // Add "admin" to the excluded windows list to ensure it's blacked out in recordings
+    {
+        let mut excluded_windows = EXCLUDED_WINDOWS.lock().map_err(|e| e.to_string())?;
+        let admin_keyword = "admin".to_lowercase();
+        if !excluded_windows.contains(&admin_keyword) {
+            excluded_windows.push(admin_keyword);
+        }
+    }
+
+    // Create a new window with the title "Admin"
+    let _child_window = tauri::webview::WebviewWindowBuilder::new(
+        app_handle,
+        "admin",
+        tauri::WebviewUrl::App("src/admin.html".into())
+    )
+    .title("Admin")
+    .inner_size(800.0, 600.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(|e| format!("Failed to create admin window: {}", e))?;
+
+    Ok("Admin window created and added to exclusion list".to_string())
 }
 
 #[tauri::command]
@@ -689,6 +905,9 @@ pub fn run() {
             update_user_activity,
             start_idle_detection,
             stop_idle_detection,
+            add_excluded_window,
+            remove_excluded_window,
+            get_excluded_windows,
             create_admin_window
         ])
         .run(tauri::generate_context!())
