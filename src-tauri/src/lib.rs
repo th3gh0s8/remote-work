@@ -7,8 +7,8 @@ use lazy_static::lazy_static;
 use screenshots::Screen;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
-use image::Rgba;
 use std::time::SystemTime;
+use image::Rgba;
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -16,7 +16,7 @@ use {
     winapi::{
         shared::{
             windef::{HWND, RECT},
-            minwindef::{LPARAM, BOOL, TRUE, FALSE},
+            minwindef::{LPARAM, BOOL, TRUE},
         },
         um::{
             winuser::{EnumWindows, GetWindowTextW, GetWindowRect, IsWindowVisible, IsIconic},
@@ -154,8 +154,14 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                                 let width = x2.saturating_sub(x1);
                                                 let height = y2.saturating_sub(y1);
 
+                                                // Make sure x1,y1 are still less than or equal to x2,y2 after clamping
+                                                if x1 >= x2 || y1 >= y2 {
+                                                    continue; // Skip if the area becomes invalid after clamping
+                                                }
+
                                                 // Skip if window exceeds reasonable size (prevent accidentally capturing entire screen)
-                                                if width > primary_screen.display_info.width || height > primary_screen.display_info.height {
+                                                // Only skip if the window is more than 90% of the screen size to be more permissive
+                                                if width * height > primary_screen.display_info.width * primary_screen.display_info.height * 9 / 10 {
                                                     continue;
                                                 }
 
@@ -309,7 +315,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
             Ok(_) => "ffmpeg".to_string(),
             Err(_) => {
                 // Neither bundled nor system FFmpeg found, attempt to download
-                for (window_label, window) in app.webview_windows() {
+                for (_window_label, window) in app.webview_windows() {
                     let _ = window.emit("recording-progress", "FFmpeg not found, downloading...");
                 }
 
@@ -317,7 +323,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                     eprintln!("Failed to download FFmpeg: {}", e);
                     return Err("FFmpeg is required for recording but could not be downloaded".to_string());
                 } else {
-                    for (window_label, window) in app.webview_windows() {
+                    for (_window_label, window) in app.webview_windows() {
                         let _ = window.emit("recording-progress", "FFmpeg downloaded successfully!");
                     }
                     ffmpeg_path.to_string_lossy().to_string()
@@ -381,7 +387,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
     // Brief delay to ensure old tasks are terminated before starting new recording
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    for (window_label, window) in app.webview_windows() {
+    for (_window_label, window) in app.webview_windows() {
         let _ = window.emit("recording-started", format!("Remote Worker: started"));
     }
 
@@ -461,8 +467,14 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                                 let width = x2.saturating_sub(x1);
                                                 let height = y2.saturating_sub(y1);
 
+                                                // Make sure x1,y1 are still less than or equal to x2,y2 after clamping
+                                                if x1 >= x2 || y1 >= y2 {
+                                                    continue; // Skip if the area becomes invalid after clamping
+                                                }
+
                                                 // Skip if window exceeds reasonable size (prevent accidentally capturing entire screen)
-                                                if width > primary_screen.display_info.width || height > primary_screen.display_info.height {
+                                                // Only skip if the window is more than 90% of the screen size to be more permissive
+                                                if width * height > primary_screen.display_info.width * primary_screen.display_info.height * 9 / 10 {
                                                     continue;
                                                 }
 
@@ -490,7 +502,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                     eprintln!("Failed to save snapshot: {}", e);
                                 } else {
                                     // Emit to all windows for screenshot
-                                    for (window_label, window) in app_for_screenshot.webview_windows() {
+                                    for (_window_label, window) in app_for_screenshot.webview_windows() {
                                         let _ = window.emit("screenshot-taken", format!("Snapshot saved: {}", filename));
                                     }
                                     // Note: Keeping event name as screenshot-taken for compatibility
@@ -526,7 +538,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
                 // Emit progress update about the remaining time to all windows
-                for (window_label, window) in app_for_screenshot.webview_windows() {
+                for (_window_label, window) in app_for_screenshot.webview_windows() {
                     let _ = window.emit("recording-progress", format!("Next snapshot in: {}m {}s", remaining_seconds / 60, remaining_seconds % 60));
                 }
 
@@ -968,7 +980,7 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
                 let total_size = response.content_length().unwrap_or(0);
 
                 if total_size > 0 {
-                    for (window_label, window) in app.webview_windows() {
+                    for (_window_label, window) in app.webview_windows() {
                         let _ = window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0)));
                     }
                 }
@@ -987,7 +999,7 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
 
                     if total_size > 0 {
                         let progress = (downloaded as f64 / total_size as f64) * 100.0;
-                        for (window_label, window) in app.webview_windows() {
+                        for (_window_label, window) in app.webview_windows() {
                             let _ = window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress));
                         }
                     }
@@ -1062,32 +1074,35 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
 async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
     println!("Stop combined recording called");
 
-    let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+    // First, handle the process termination without holding the mutex across await
+    {
+        let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
 
-    if process_guard.is_none() {
-        println!("No recording in progress");
-        return Ok("No recording in progress".to_string());
-    }
-
-    // Kill the recording process
-    if let Some(child) = process_guard.as_mut() {
-        println!("Attempting to kill recording process");
-        match child.kill() {
-            Ok(_) => {
-                println!("Successfully sent kill signal to process");
-                // Wait for the process to finish
-                match child.wait() {
-                    Ok(exit_status) => println!("Process exited with: {}", exit_status),
-                    Err(e) => println!("Error waiting for process: {}", e),
-                }
-            },
-            Err(e) => println!("Error killing process: {}", e),
+        if process_guard.is_none() {
+            println!("No recording in progress");
+            return Ok("No recording in progress".to_string());
         }
-    }
 
-    // Clear the recording process
-    *process_guard = None;
-    println!("Cleared recording process");
+        // Kill the recording process
+        if let Some(child) = process_guard.as_mut() {
+            println!("Attempting to kill recording process");
+            match child.kill() {
+                Ok(_) => {
+                    println!("Successfully sent kill signal to process");
+                    // Wait for the process to finish
+                    match child.wait() {
+                        Ok(exit_status) => println!("Process exited with: {}", exit_status),
+                        Err(e) => println!("Error waiting for process: {}", e),
+                    }
+                },
+                Err(e) => println!("Error killing process: {}", e),
+            }
+        }
+
+        // Clear the recording process
+        *process_guard = None;
+        println!("Cleared recording process");
+    } // process_guard is dropped here
 
     // Cancel the screenshot task if it exists
     {
@@ -1106,7 +1121,7 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
 
     // Update the UI in all windows
     // Emit to each active window
-    for (window_label, window) in app.webview_windows() {
+    for (_window_label, window) in app.webview_windows() {
         let _ = window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.");
     }
 
@@ -1120,7 +1135,7 @@ async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
 
     // Emit event to notify all UI windows
     // Emit to each active window
-    for (window_label, window) in app.webview_windows() {
+    for (_window_label, window) in app.webview_windows() {
         let _ = window.emit("recording-paused", "Recording has been paused");
     }
 
@@ -1134,7 +1149,7 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
 
     // Emit event to notify all UI windows
     // Emit to each active window
-    for (window_label, window) in app.webview_windows() {
+    for (_window_label, window) in app.webview_windows() {
         let _ = window.emit("recording-resumed", "Recording has been resumed");
     }
 
