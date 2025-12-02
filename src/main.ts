@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { NetworkStatsComponent } from "./network-stats";
+import { NetworkUsageComponent } from "./network-usage";
 
 let recordBtn: HTMLButtonElement | null;
 let stopBtn: HTMLButtonElement | null;
@@ -261,9 +261,9 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Initialize network stats component
-  const networkStats = new NetworkStatsComponent();
-  networkStats.start();
+  // Initialize network usage component (with global network stats)
+  const networkUsage = new NetworkUsageComponent(true);
+  networkUsage.start();
 
   async function createAdminWindow() {
     try {

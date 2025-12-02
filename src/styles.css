@@ -129,8 +129,8 @@ body {
   font-size: 1.1em;
 }
 
-/* Network stats specific styles */
-.network-stats-section {
+/* Network usage specific styles */
+.network-usage-section {
   background: #3d3d3d;
   border-radius: 8px;
   padding: 15px;
@@ -139,7 +139,7 @@ body {
   border: 1px solid #555;
 }
 
-.network-stats-grid {
+.network-usage-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 10px;
