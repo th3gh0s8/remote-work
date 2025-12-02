@@ -13,11 +13,16 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "remote-work",
-        "width": 800,
-        "height": 600,
-        "resizable": false,
-        "maximizable": false
+        "title": "Remote Worker",
+        "width": 900,
+        "height": 650,
+        "resizable": true,
+        "maximizable": true,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "transparent": false,
+        "fullscreen": false
       }
     ],
     "security": {

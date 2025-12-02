@@ -3,270 +3,646 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Admin Panel</title>
+    <title>Admin Panel - Remote Worker</title>
     <style>
-      body {
-        font-family: sans-serif;
-        background-color: #f0f0f0;
-        padding: 20px;
+      :root {
+        --primary-color: #3b5bdb;
+        --primary-dark: #2c4a96;
+        --primary-light: #4a6fc9;
+        --secondary-color: #6c757d;
+        --success-color: #28a745;
+        --warning-color: #ffc107;
+        --danger-color: #dc3545;
+        --info-color: #17a2b8;
+        --light-bg: #2d2d2d;
+        --dark-bg: #1e1e1e;
+        --darker-bg: #1a1a1a;
+        --border-color: #555;
+        --text-primary: #e2e8f0;
+        --text-secondary: #cbd5e0;
+        --card-bg: #3d3d3d;
+        --sidebar-width: 250px;
+        --header-height: 60px;
+        --border-radius: 8px;
+        --box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        --transition: all 0.3s ease;
+      }
+
+      * {
         margin: 0;
+        padding: 0;
+        box-sizing: border-box;
       }
 
-      .container {
-        max-width: 800px;
-        margin: 0 auto;
-        background: white;
-        padding: 30px;
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        background-color: #1a1a1a;
+        color: var(--text-primary);
+        height: 100vh;
+        overflow: hidden;
       }
 
-      h1 {
-        color: #d32f2f;
-        text-align: center;
-        margin-top: 0;
+      .app-container {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        width: 100%;
+        max-width: 100%;
+        background: var(--darker-bg);
+        box-shadow: var(--box-shadow);
+        border: 1px solid var(--border-color);
       }
 
-      .warning {
-        background-color: #fff3cd;
-        border: 1px solid #ffeaa7;
-        color: #856404;
-        padding: 15px;
+      /* Header styling */
+      .app-header {
+        background: linear-gradient(135deg, var(--primary-dark), var(--primary-color));
+        color: white;
+        padding: 0 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: var(--header-height);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        z-index: 100;
+      }
+
+      .app-title {
+        font-size: 1.2rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .app-title-icon {
+        width: 24px;
+        height: 24px;
+        background: rgba(255, 255, 255, 0.2);
         border-radius: 4px;
-        margin: 20px 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
 
-      .info {
-        margin-top: 20px;
-        font-size: 0.9em;
-        color: #666;
+      /* Main content area */
+      .main-content {
+        display: flex;
+        flex: 1;
+        overflow: hidden;
+      }
+
+      /* Sidebar navigation */
+      .sidebar {
+        width: var(--sidebar-width);
+        background: var(--dark-bg);
+        color: white;
+        padding: 20px 0;
+        overflow-y: auto;
+        border-right: 1px solid var(--border-color);
+        transition: var(--transition);
+      }
+
+      .nav-item {
+        padding: 12px 20px;
+        margin: 4px 10px;
+        border-radius: var(--border-radius);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        transition: var(--transition);
+        color: var(--text-primary);
+      }
+
+      .nav-item:hover {
+        background: rgba(255, 255, 255, 0.15);
+      }
+
+      .nav-item.active {
+        background: var(--primary-color);
+        color: white;
+      }
+
+      .nav-item i {
+        width: 20px;
         text-align: center;
+      }
+
+      /* Content area */
+      .content-area {
+        flex: 1;
+        padding: 20px;
+        overflow-y: auto;
+        background: var(--dark-bg);
       }
 
       .section {
-        margin-top: 30px;
+        background: var(--card-bg);
+        border-radius: var(--border-radius);
         padding: 20px;
-        background-color: #f8f9fa;
-        border-radius: 6px;
-        border: 1px solid #e9ecef;
+        margin-bottom: 20px;
+        box-shadow: var(--box-shadow);
+        border: 1px solid var(--border-color);
       }
 
-      .section h2 {
-        color: #495057;
-        font-size: 1.2em;
-        margin-top: 0;
+      .section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      .section-title {
+        font-size: 1.2rem;
+        font-weight: 600;
+        color: var(--primary-light);
+        margin: 0;
+      }
+
+      .section-description {
+        color: var(--text-secondary);
+        margin-bottom: 15px;
+        font-size: 0.9rem;
+      }
+
+      .form-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+        margin-bottom: 15px;
       }
 
       .form-group {
-        margin-bottom: 15px;
+        flex: 1;
+        min-width: 250px;
+        margin-bottom: 0;
       }
 
       label {
         display: block;
-        margin-bottom: 5px;
-        font-weight: bold;
-        color: #495057;
+        margin-bottom: 6px;
+        font-weight: 500;
+        color: var(--text-primary);
       }
 
       input[type="text"],
       input[type="number"],
       select {
         width: 100%;
-        padding: 8px 12px;
-        border: 1px solid #ced4da;
-        border-radius: 4px;
-        font-size: 1em;
-        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius);
+        font-size: 0.95rem;
+        color: var(--text-primary);
+        background-color: #333;
+        transition: var(--transition);
       }
 
-      button {
-        background-color: #007bff;
-        color: white;
-        border: none;
-        padding: 10px 15px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 1em;
+      input:focus,
+      select:focus {
+        outline: none;
+        border-color: var(--primary-light);
+        box-shadow: 0 0 0 3px rgba(74, 111, 201, 0.3);
+      }
+
+      .option-group {
+        display: flex;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+
+      .option-group input[type="checkbox"] {
         margin-right: 10px;
-        margin-bottom: 10px;
+        width: 18px;
+        height: 18px;
       }
 
-      button:hover {
-        background-color: #0056b3;
+      .option-group label {
+        margin-bottom: 0;
+        font-weight: normal;
+        cursor: pointer;
       }
 
-      button.remove {
-        background-color: #dc3545;
+      /* Button styles */
+      button {
+        border: none;
+        border-radius: var(--border-radius);
+        padding: 10px 16px;
+        font-size: 0.95rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: var(--transition);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
       }
 
-      button.remove:hover {
-        background-color: #c82333;
+      button.primary {
+        background-color: var(--primary-color);
+        color: white;
+      }
+
+      button.primary:hover {
+        background-color: var(--primary-light);
       }
 
       button.secondary {
-        background-color: #6c757d;
+        background-color: var(--secondary-color);
+        color: white;
       }
 
       button.secondary:hover {
         background-color: #5a6268;
       }
 
+      button.success {
+        background-color: var(--success-color);
+        color: white;
+      }
+
+      button.success:hover {
+        background-color: #218838;
+      }
+
+      button.danger {
+        background-color: var(--danger-color);
+        color: white;
+      }
+
+      button.danger:hover {
+        background-color: #c82333;
+      }
+
+      button.outline {
+        background-color: transparent;
+        border: 1px solid var(--primary-color);
+        color: var(--primary-color);
+      }
+
+      button.outline:hover {
+        background-color: var(--primary-color);
+        color: white;
+      }
+
+      /* Status and alerts */
+      .status-card {
+        background: #333;
+        border-radius: var(--border-radius);
+        padding: 15px;
+        margin-top: 15px;
+        border-left: 4px solid var(--primary-color);
+      }
+
+      .status-item {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+
+      .status-label {
+        font-weight: 500;
+        color: var(--text-secondary);
+      }
+
+      .status-value {
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .warning {
+        background-color: rgba(255, 193, 7, 0.15);
+        border: 1px solid rgba(255, 193, 7, 0.4);
+        color: #ffd700;
+        padding: 12px;
+        border-radius: var(--border-radius);
+        margin-bottom: 15px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .status-message {
+        margin-top: 15px;
+        padding: 12px;
+        border-radius: var(--border-radius);
+        text-align: center;
+        display: none;
+      }
+
+      .status-success {
+        background-color: rgba(40, 167, 69, 0.15);
+        color: #5cb85c;
+        border: 1px solid rgba(40, 167, 69, 0.4);
+      }
+
+      .status-error {
+        background-color: rgba(220, 53, 69, 0.15);
+        color: #e74c3c;
+        border: 1px solid rgba(220, 53, 69, 0.4);
+      }
+
+      /* Window list */
       .window-list {
         margin-top: 15px;
-        max-height: 200px;
+        max-height: 300px;
         overflow-y: auto;
-        background-color: white;
-        border: 1px solid #ced4da;
-        border-radius: 4px;
-        padding: 10px;
+        background-color: #333;
+        border: 1px solid var(--border-color);
+        border-radius: var(--border-radius);
+        padding: 5px;
       }
 
       .window-item {
-        padding: 8px;
-        border-bottom: 1px solid #eee;
+        padding: 10px 15px;
+        border-bottom: 1px solid var(--border-color);
         display: flex;
         justify-content: space-between;
         align-items: center;
+        transition: var(--transition);
       }
 
       .window-item:last-child {
         border-bottom: none;
       }
 
-      .status-message {
-        margin-top: 10px;
-        padding: 10px;
-        border-radius: 4px;
+      .window-item:hover {
+        background-color: #444;
+      }
+
+      .window-title {
+        flex: 1;
+        word-break: break-word;
+        color: var(--text-primary);
+      }
+
+      .window-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      /* Footer */
+      .app-footer {
+        padding: 15px 20px;
         text-align: center;
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        border-top: 1px solid var(--border-color);
+        background: var(--dark-bg);
       }
 
-      .status-success {
-        background-color: #d4edda;
-        color: #155724;
-        border: 1px solid #c3e6cb;
+      /* Responsive design */
+      @media (max-width: 992px) {
+        .sidebar {
+          width: 70px;
+          overflow: visible;
+        }
+
+        .nav-text {
+          display: none;
+        }
+
+        .nav-item {
+          justify-content: center;
+          padding: 15px 0;
+        }
       }
 
-      .status-error {
-        background-color: #f8d7da;
-        color: #721c24;
-        border: 1px solid #f5c6cb;
+      @media (max-width: 768px) {
+        .app-container {
+          height: 100vh;
+        }
+
+        .main-content {
+          flex-direction: column;
+        }
+
+        .sidebar {
+          width: 100%;
+          height: auto;
+          border-right: none;
+          border-bottom: 1px solid var(--border-color);
+          padding: 10px 0;
+          background: var(--dark-bg);
+        }
+
+        .nav-container {
+          display: flex;
+          overflow-x: auto;
+        }
+
+        .nav-item {
+          flex: 1;
+          min-width: 100px;
+          padding: 10px 5px;
+          margin: 0 5px;
+          flex-direction: column;
+        }
+
+        .content-area {
+          padding: 15px;
+          background: var(--dark-bg);
+        }
+
+        .form-group {
+          min-width: 100%;
+        }
       }
 
-      .recording-options {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-        gap: 15px;
-      }
+      @media (max-width: 576px) {
+        .app-header {
+          padding: 0 15px;
+        }
 
-      .option-group {
-        margin-bottom: 15px;
-      }
+        .section {
+          padding: 15px;
+        }
 
-      .option-group label {
-        display: inline;
-        margin-left: 8px;
-        font-weight: normal;
+        .form-row {
+          flex-direction: column;
+          gap: 15px;
+        }
+
+        .status-card {
+          padding: 10px;
+        }
+
+        .status-item {
+          flex-direction: column;
+          gap: 4px;
+        }
       }
     </style>
   </head>
   <body>
-    <div class="container">
-      <h1>Admin Panel</h1>
+    <div class="app-container">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="app-title">
+          <div class="app-title-icon">⚙️</div>
+          <span>Remote Worker Admin Panel</span>
+        </div>
+      </header>
 
-      <div class="warning">
-        <strong>Warning:</strong> This window is hidden from screenshots for privacy.
+      <!-- Main Content -->
+      <div class="main-content">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+          <div class="nav-container">
+            <div class="nav-item active" title="Configure recording settings">
+              <i>🎥</i>
+              <span class="nav-text">Recording</span>
+            </div>
+            <div class="nav-item" title="Manage window exclusions and privacy settings">
+              <i>🔒</i>
+              <span class="nav-text">Privacy</span>
+            </div>
+            <div class="nav-item" title="View system status and performance">
+              <i>📊</i>
+              <span class="nav-text">Status</span>
+            </div>
+            <div class="nav-item" title="Application settings and preferences">
+              <i>⚙️</i>
+              <span class="nav-text">Settings</span>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Content Area -->
+        <main class="content-area">
+          <div class="warning">
+            <strong>⚠️ Privacy Notice:</strong> This window is hidden from screenshots and recordings for security.
+          </div>
+
+          <p>This is a private admin panel with controls for recording and screenshot settings.</p>
+
+          <!-- Recording Options Section -->
+          <div class="section" id="recording-section">
+            <div class="section-header">
+              <h2 class="section-title">Recording & Screenshot Options</h2>
+            </div>
+            <div class="status-card" style="margin-bottom: 15px;">
+              <div class="status-item">
+                <span class="status-label">Recording Status:</span>
+                <span id="recording-status-indicator" class="status-value">Not Recording</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Recording State:</span>
+                <span id="recording-state-indicator" class="status-value">Inactive</span>
+              </div>
+            </div>
+            <p class="section-description">Configure how recordings and screenshots are captured.</p>
+
+            <div class="form-row">
+              <div class="form-group">
+                <div class="option-group">
+                  <input type="checkbox" id="record-audio" title="Enable system audio recording" checked>
+                  <label for="record-audio">Record system audio</label>
+                </div>
+
+                <div class="option-group">
+                  <input type="checkbox" id="record-webcam" title="Include webcam feed in recordings" checked>
+                  <label for="record-webcam">Include webcam feed</label>
+                </div>
+
+                <div class="option-group">
+                  <input type="checkbox" id="hide-cursor" title="Hide mouse cursor in recordings" checked>
+                  <label for="hide-cursor">Hide cursor in recordings</label>
+                </div>
+
+                <div class="option-group">
+                  <input type="checkbox" id="auto-save" title="Automatically save recordings when finished" checked>
+                  <label for="auto-save">Auto-save recordings</label>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="screenshot-interval">Screenshot Interval (minutes):</label>
+                <input type="number" id="screenshot-interval" min="1" max="60" value="15" title="Set the interval between screenshots in minutes">
+              </div>
+
+              <div class="form-group">
+                <label for="recording-quality">Recording Quality:</label>
+                <select id="recording-quality" title="Select the quality level for recordings">
+                  <option value="low">Low (faster, smaller files)</option>
+                  <option value="medium" selected>Medium (balanced)</option>
+                  <option value="high">High (better quality)</option>
+                  <option value="lossless">Lossless (largest files)</option>
+                </select>
+              </div>
+            </div>
+
+            <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+              <button id="save-options-btn" class="primary" title="Save all current settings">Save Options</button>
+              <button id="reset-options-btn" class="outline" title="Reset all settings to default values">Reset to Defaults</button>
+              <button id="pause-recording-btn" class="outline" title="Pause the current recording">Pause Recording</button>
+              <button id="resume-recording-btn" class="outline" title="Resume the paused recording">Resume Recording</button>
+              <button id="stop-recording-btn" class="danger" title="Stop the current recording">Stop Recording</button>
+            </div>
+          </div>
+
+          <!-- Window Exclusion Management -->
+          <div class="section" id="privacy-section">
+            <div class="section-header">
+              <h2 class="section-title">Window Exclusion Management</h2>
+            </div>
+            <p class="section-description">Add or remove window titles from the exclusion list to control which windows are hidden during recordings and screenshots.</p>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="window-title">Window Title to Exclude:</label>
+                <input type="text" id="window-title" placeholder="e.g., Password, Settings, etc." title="Enter the window title to exclude from recordings">
+              </div>
+
+              <div class="form-group" style="display: flex; align-items: flex-end;">
+                <button id="add-window-btn" class="success" title="Add the window title to the exclusion list">Add to Exclusion List</button>
+              </div>
+            </div>
+
+            <div style="margin-top: 15px;">
+              <button id="refresh-list-btn" class="outline" title="Refresh the list of excluded windows">Refresh List</button>
+            </div>
+
+            <div id="status-message" class="status-message"></div>
+
+            <h3 style="margin: 15px 0 10px;">Current Excluded Windows:</h3>
+            <div id="excluded-windows-list" class="window-list">
+              <!-- List will be populated dynamically -->
+            </div>
+          </div>
+
+          <!-- System Status Section -->
+          <div class="section" id="status-section">
+            <div class="section-header">
+              <h2 class="section-title">System Status</h2>
+            </div>
+            <p class="section-description">Monitor the application status and performance.</p>
+
+            <div class="status-card">
+              <div class="status-item">
+                <span class="status-label">Recording Status:</span>
+                <span id="recording-status" class="status-value">Not Recording</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Storage Used:</span>
+                <span id="storage-used" class="status-value">0 MB</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Active Sessions:</span>
+                <span id="active-sessions" class="status-value">0</span>
+              </div>
+            </div>
+          </div>
+        </main>
       </div>
 
-      <p>This is a private admin panel with controls for recording and screenshot settings.</p>
-
-      <div class="section">
-        <h2>Recording & Screenshot Options</h2>
-        <p>Configure how recordings and screenshots are captured.</p>
-
-        <div class="recording-options">
-          <div class="option-group">
-            <input type="checkbox" id="record-audio" checked>
-            <label for="record-audio">Record system audio</label>
-          </div>
-
-          <div class="option-group">
-            <input type="checkbox" id="record-webcam" checked>
-            <label for="record-webcam">Include webcam feed</label>
-          </div>
-
-          <div class="option-group">
-            <input type="checkbox" id="hide-cursor" checked>
-            <label for="hide-cursor">Hide cursor in recordings</label>
-          </div>
-
-          <div class="option-group">
-            <input type="checkbox" id="auto-save" checked>
-            <label for="auto-save">Auto-save recordings</label>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="screenshot-interval">Screenshot Interval (minutes):</label>
-          <input type="number" id="screenshot-interval" min="1" max="60" value="15">
-        </div>
-
-        <div class="form-group">
-          <label for="recording-quality">Recording Quality:</label>
-          <select id="recording-quality">
-            <option value="low">Low (faster, smaller files)</option>
-            <option value="medium" selected>Medium (balanced)</option>
-            <option value="high">High (better quality)</option>
-            <option value="lossless">Lossless (largest files)</option>
-          </select>
-        </div>
-
-        <button id="save-options-btn" class="secondary">Save Options</button>
-        <button id="reset-options-btn">Reset to Defaults</button>
-      </div>
-
-      <div class="section">
-        <h2>Window Exclusion Management</h2>
-        <p>Add or remove window titles from the exclusion list to control which windows are hidden during recordings and screenshots.</p>
-
-        <div class="form-group">
-          <label for="window-title">Window Title to Exclude:</label>
-          <input type="text" id="window-title" placeholder="e.g., Password, Settings, etc.">
-        </div>
-
-        <button id="add-window-btn">Add to Exclusion List</button>
-        <button id="refresh-list-btn">Refresh List</button>
-
-        <div id="status-message" class="status-message" style="display: none;"></div>
-
-        <h3>Current Excluded Windows:</h3>
-        <div id="excluded-windows-list" class="window-list">
-          <!-- List will be populated dynamically -->
-        </div>
-      </div>
-
-      <div class="section">
-        <h2>System Status</h2>
-        <p>Monitor the application status and performance.</p>
-
-        <div class="recording-options">
-          <div class="option-group">
-            <label>Recording Status:</label>
-            <div id="recording-status">Not Recording</div>
-          </div>
-          <div class="option-group">
-            <label>Storage Used:</label>
-            <div id="storage-used">0 MB</div>
-          </div>
-          <div class="option-group">
-            <label>Active Sessions:</label>
-            <div id="active-sessions">0</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="info">
+      <!-- Footer -->
+      <footer class="app-footer">
         <p>Press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>`</kbd> (backtick) to open this window again.</p>
-      </div>
+      </footer>
     </div>
 
     <script type="module">
@@ -289,10 +665,19 @@
       const hideCursor = document.getElementById('hide-cursor');
       const autoSave = document.getElementById('auto-save');
 
+      // Recording control buttons
+      const pauseRecordingBtn = document.getElementById('pause-recording-btn');
+      const resumeRecordingBtn = document.getElementById('resume-recording-btn');
+      const stopRecordingBtn = document.getElementById('stop-recording-btn');
+
       // Status elements
       const recordingStatus = document.getElementById('recording-status');
       const storageUsed = document.getElementById('storage-used');
       const activeSessions = document.getElementById('active-sessions');
+
+      // Recording status indicators
+      const recordingStatusIndicator = document.getElementById('recording-status-indicator');
+      const recordingStateIndicator = document.getElementById('recording-state-indicator');
 
       // Show status message
       function showStatus(message, isSuccess = true) {
@@ -313,7 +698,7 @@
           excludedWindowsList.innerHTML = '';
 
           if (excludedWindows.length === 0) {
-            excludedWindowsList.innerHTML = '<p style="text-align: center; color: #6c757d; margin: 0;">No windows currently excluded</p>';
+            excludedWindowsList.innerHTML = '<div style="text-align: center; color: #6c757d; padding: 20px;">No windows currently excluded</div>';
             return;
           }
 
@@ -322,11 +707,16 @@
             windowItem.className = 'window-item';
 
             const titleSpan = document.createElement('span');
+            titleSpan.className = 'window-title';
             titleSpan.textContent = windowTitle;
+
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'window-actions';
 
             const removeBtn = document.createElement('button');
             removeBtn.textContent = 'Remove';
-            removeBtn.className = 'remove';
+            removeBtn.className = 'danger';
+            removeBtn.title = 'Remove this window from the exclusion list';
             removeBtn.onclick = async () => {
               try {
                 const result = await invoke('remove_excluded_window', { windowTitle });
@@ -337,8 +727,9 @@
               }
             };
 
+            actionsDiv.appendChild(removeBtn);
             windowItem.appendChild(titleSpan);
-            windowItem.appendChild(removeBtn);
+            windowItem.appendChild(actionsDiv);
             excludedWindowsList.appendChild(windowItem);
           });
         } catch (error) {
@@ -426,14 +817,157 @@
       saveOptionsBtn.addEventListener('click', saveOptions);
       resetOptionsBtn.addEventListener('click', resetOptions);
 
-      // Initialize the page
-      document.addEventListener('DOMContentLoaded', () => {
+      // Recording control button event listeners
+      pauseRecordingBtn?.addEventListener('click', async () => {
+        try {
+          const result = await invoke('pause_combined_recording');
+          showStatus(result);
+          // Update button visibility
+          pauseRecordingBtn.style.display = 'none';
+          resumeRecordingBtn.style.display = 'inline-flex';
+          // Update status indicators
+          recordingStateIndicator.textContent = 'Paused';
+          recordingStateIndicator.style.color = '#ffc107'; // Yellow for paused
+        } catch (error) {
+          showStatus(`Error pausing recording: ${error}`, false);
+        }
+      });
+
+      resumeRecordingBtn?.addEventListener('click', async () => {
+        try {
+          const result = await invoke('resume_combined_recording');
+          showStatus(result);
+          // Update button visibility
+          resumeRecordingBtn.style.display = 'none';
+          pauseRecordingBtn.style.display = 'inline-flex';
+          // Update status indicators
+          recordingStateIndicator.textContent = 'Active';
+          recordingStateIndicator.style.color = '#28a745'; // Green for active
+        } catch (error) {
+          showStatus(`Error resuming recording: ${error}`, false);
+        }
+      });
+
+      stopRecordingBtn?.addEventListener('click', async () => {
+        try {
+          const result = await invoke('stop_combined_recording');
+          showStatus(result);
+          // Update button visibility
+          pauseRecordingBtn.style.display = 'none';
+          resumeRecordingBtn.style.display = 'none';
+          stopRecordingBtn.style.display = 'none';
+          // Update status indicators
+          recordingStatusIndicator.textContent = 'Not Recording';
+          recordingStateIndicator.textContent = 'Inactive';
+          recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
+        } catch (error) {
+          showStatus(`Error stopping recording: ${error}`, false);
+        }
+      });
+
+      // Navigation functionality
+      const navItems = document.querySelectorAll('.nav-item');
+
+      navItems.forEach((item, index) => {
+        item.addEventListener('click', function() {
+          // Remove active class from all nav items
+          navItems.forEach(i => i.classList.remove('active'));
+          // Add active class to clicked item
+          this.classList.add('active');
+
+          // Hide all sections
+          document.querySelectorAll('.section').forEach(section => {
+            section.style.display = 'none';
+          });
+
+          // Show the corresponding section based on nav item index
+          if (index === 0) { // Recording
+            document.getElementById('recording-section').style.display = 'block';
+          } else if (index === 1) { // Privacy (Window Exclusion)
+            document.getElementById('privacy-section').style.display = 'block';
+          } else if (index === 2) { // Status
+            document.getElementById('status-section').style.display = 'block';
+          } else if (index === 3) { // Settings (Recording Options)
+            document.getElementById('recording-section').style.display = 'block';
+          }
+        });
+      });
+
+      // Update status indicators when page loads
+      recordingStatusIndicator.textContent = 'Not Recording';
+      recordingStateIndicator.textContent = 'Inactive';
+      recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
+
+      // Listen for recording events from Rust backend to keep UI synchronized across all windows
+      window.addEventListener('DOMContentLoaded', async () => {
+        // Import tauri event listener
+        const { listen } = await import('@tauri-apps/api/event');
+
+        // Listen for recording started event
+        listen('recording-started', (event) => {
+          recordingStatusIndicator.textContent = 'Recording';
+          recordingStateIndicator.textContent = 'Active';
+          recordingStateIndicator.style.color = '#28a745'; // Green for active
+
+          // Show pause and stop buttons, hide resume button
+          if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'inline-flex';
+          if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
+          if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
+        });
+
+        // Listen for recording paused event
+        listen('recording-paused', (event) => {
+          recordingStateIndicator.textContent = 'Paused';
+          recordingStateIndicator.style.color = '#ffc107'; // Yellow for paused
+
+          // Show resume and stop buttons, hide pause button
+          if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'none';
+          if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'inline-flex';
+          if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
+        });
+
+        // Listen for recording resumed event
+        listen('recording-resumed', (event) => {
+          recordingStateIndicator.textContent = 'Active';
+          recordingStateIndicator.style.color = '#28a745'; // Green for active
+
+          // Show pause and stop buttons, hide resume button
+          if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'inline-flex';
+          if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
+          if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
+        });
+
+        // Listen for recording finished event
+        listen('recording-finished', (event) => {
+          recordingStatusIndicator.textContent = 'Not Recording';
+          recordingStateIndicator.textContent = 'Inactive';
+          recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
+
+          // Hide all recording control buttons
+          if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'none';
+          if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
+          if (stopRecordingBtn) stopRecordingBtn.style.display = 'none';
+        });
+
+        // Initialize the page - show the first section by default
         loadOptions();
         populateExcludedWindowsList();
         updateStatus();
 
+        // Initially hide all sections except the first one
+        document.querySelectorAll('.section').forEach((section, index) => {
+          if (index !== 0) {
+            section.style.display = 'none';
+          }
+        });
+
         // Update status periodically
         setInterval(updateStatus, 5000);
+
+        // Initially set status indicators
+        recordingStatusIndicator.textContent = 'Not Recording';
+        recordingStateIndicator.textContent = 'Inactive';
+        recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
       });
     </script>
   </body>

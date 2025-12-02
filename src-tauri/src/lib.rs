@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 use std::fs;
@@ -6,8 +7,8 @@ use lazy_static::lazy_static;
 use screenshots::Screen;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
-use image::Rgba;
 use std::time::SystemTime;
+use image::Rgba;
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -15,7 +16,7 @@ use {
     winapi::{
         shared::{
             windef::{HWND, RECT},
-            minwindef::{LPARAM, BOOL, TRUE, FALSE},
+            minwindef::{LPARAM, BOOL, TRUE},
         },
         um::{
             winuser::{EnumWindows, GetWindowTextW, GetWindowRect, IsWindowVisible, IsIconic},
@@ -153,8 +154,14 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                                 let width = x2.saturating_sub(x1);
                                                 let height = y2.saturating_sub(y1);
 
+                                                // Make sure x1,y1 are still less than or equal to x2,y2 after clamping
+                                                if x1 >= x2 || y1 >= y2 {
+                                                    continue; // Skip if the area becomes invalid after clamping
+                                                }
+
                                                 // Skip if window exceeds reasonable size (prevent accidentally capturing entire screen)
-                                                if width > primary_screen.display_info.width || height > primary_screen.display_info.height {
+                                                // Only skip if the window is more than 90% of the screen size to be more permissive
+                                                if width * height > primary_screen.display_info.width * primary_screen.display_info.height * 9 / 10 {
                                                     continue;
                                                 }
 
@@ -250,12 +257,16 @@ fn stop_screenshotting() -> Result<String, String> {
 
 // Global state to track combined recording status
 use std::process::{Child, Command};
+use tokio::task::JoinHandle;
 lazy_static! {
     static ref COMBINED_RECORDING_PROCESS: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
+    static ref RECORDING_PAUSED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    static ref SCREENSHOT_TASK_HANDLE: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 }
 
+
 #[tauri::command]
-async fn start_combined_recording(window: tauri::Window) -> Result<String, String> {
+async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
     // Check if there's already a recording in progress
     {
         let process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
@@ -304,13 +315,17 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
             Ok(_) => "ffmpeg".to_string(),
             Err(_) => {
                 // Neither bundled nor system FFmpeg found, attempt to download
-                window.emit("recording-progress", "FFmpeg not found, downloading...").unwrap();
+                for (_window_label, window) in app.webview_windows() {
+                    let _ = window.emit("recording-progress", "FFmpeg not found, downloading...");
+                }
 
-                if let Err(e) = download_ffmpeg_bundled(window.clone(), &ffmpeg_path).await {
+                if let Err(e) = download_ffmpeg_bundled_app(&app, &ffmpeg_path).await {
                     eprintln!("Failed to download FFmpeg: {}", e);
                     return Err("FFmpeg is required for recording but could not be downloaded".to_string());
                 } else {
-                    window.emit("recording-progress", "FFmpeg downloaded successfully!").unwrap();
+                    for (_window_label, window) in app.webview_windows() {
+                        let _ = window.emit("recording-progress", "FFmpeg downloaded successfully!");
+                    }
                     ffmpeg_path.to_string_lossy().to_string()
                 }
             }
@@ -360,23 +375,47 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
         *process_guard = Some(child);
     }
 
-    window.emit("recording-started", format!("Remote Worker: started")).unwrap();
+    // Clear any previous screenshot task handle
+    {
+        let mut task_guard = SCREENSHOT_TASK_HANDLE.lock().unwrap();
+        if let Some(old_task) = task_guard.take() {
+            old_task.abort(); // Cancel any old task
+            println!("Cancelled old screenshot task if it existed");
+        }
+    }
+
+    // Brief delay to ensure old tasks are terminated before starting new recording
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    for (_window_label, window) in app.webview_windows() {
+        let _ = window.emit("recording-started", format!("Remote Worker: started"));
+    }
 
     // Start the screenshot-taking process in parallel
     let screenshot_session_id = session_id.clone();
-    let screenshot_window = window.clone();
-    tokio::spawn(async move {
+    let app_for_screenshot = app.clone(); // Clone the app handle for the async block
+    let screenshot_task = tokio::spawn(async move {
         let start_time = Instant::now();
 
         loop {
             // Check if the recording process is still active
             let is_active = {
                 let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
+                // Check if there's a recording process running (not None)
                 process_guard.is_some()
             };
 
             if !is_active {
+                println!("Screenshot task terminating: recording process no longer active");
                 break; // Stop if the recording process has been terminated
+            }
+
+            // Check if the recording is paused
+            let is_paused = RECORDING_PAUSED.load(Ordering::SeqCst);
+            if is_paused {
+                // Wait for a short period before checking again
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                continue; // Skip screenshot capture when paused
             }
 
             // Take a screenshot
@@ -428,8 +467,14 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                                                 let width = x2.saturating_sub(x1);
                                                 let height = y2.saturating_sub(y1);
 
+                                                // Make sure x1,y1 are still less than or equal to x2,y2 after clamping
+                                                if x1 >= x2 || y1 >= y2 {
+                                                    continue; // Skip if the area becomes invalid after clamping
+                                                }
+
                                                 // Skip if window exceeds reasonable size (prevent accidentally capturing entire screen)
-                                                if width > primary_screen.display_info.width || height > primary_screen.display_info.height {
+                                                // Only skip if the window is more than 90% of the screen size to be more permissive
+                                                if width * height > primary_screen.display_info.width * primary_screen.display_info.height * 9 / 10 {
                                                     continue;
                                                 }
 
@@ -456,7 +501,11 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                                 if let Err(e) = img.save(&filepath) {
                                     eprintln!("Failed to save snapshot: {}", e);
                                 } else {
-                                    screenshot_window.emit("screenshot-taken", format!("Snapshot saved: {}", filename)).unwrap(); // Note: Keeping event name as screenshot-taken for compatibility
+                                    // Emit to all windows for screenshot
+                                    for (_window_label, window) in app_for_screenshot.webview_windows() {
+                                        let _ = window.emit("screenshot-taken", format!("Snapshot saved: {}", filename));
+                                    }
+                                    // Note: Keeping event name as screenshot-taken for compatibility
                                     // Update user activity since a snapshot was just taken (user is likely active)
                                     if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
                                         *last_activity = SystemTime::now();
@@ -483,16 +532,15 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
                 rng.gen_range(300..=1800) // 5 to 30 minutes in seconds
             };
 
-            let screenshot_window_clone = screenshot_window.clone();
             // Wait for the random interval before taking the next screenshot
             // But check every second if recording is still active
             for remaining_seconds in (1..=random_interval).rev() {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-                // Emit progress update about the remaining time
-                let minutes = remaining_seconds / 60;
-                let seconds = remaining_seconds % 60;
-                screenshot_window_clone.emit("recording-progress", format!("Next snapshot in: {}m {}s", minutes, seconds)).unwrap();
+                // Emit progress update about the remaining time to all windows
+                for (_window_label, window) in app_for_screenshot.webview_windows() {
+                    let _ = window.emit("recording-progress", format!("Next snapshot in: {}m {}s", remaining_seconds / 60, remaining_seconds % 60));
+                }
 
                 let is_active = {
                     let process_guard = COMBINED_RECORDING_PROCESS.lock().unwrap();
@@ -511,10 +559,17 @@ async fn start_combined_recording(window: tauri::Window) -> Result<String, Strin
             };
 
             if !is_active {
+                println!("Screenshot task terminating: recording process no longer active (end of loop)");
                 break; // Exit the main loop if recording stopped
             }
         }
     });
+
+    // Store the screenshot task handle in global state so we can cancel it later
+    {
+        let mut task_guard = SCREENSHOT_TASK_HANDLE.lock().unwrap();
+        *task_guard = Some(screenshot_task);
+    }
 
     Ok(format!("Remote Worker: started: (Session ID: {})", session_id))
 }
@@ -882,27 +937,223 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
     }
 }
 
+async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::fs::File;
+    use futures_util::StreamExt;
+
+    // Determine the appropriate FFmpeg build based on the platform
+    let (download_url, executable_name) = {
+        #[cfg(target_os = "windows")]
+        {
+            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // For macOS, we would need a different URL
+            return Err("macOS automatic FFmpeg download not implemented".into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // For Linux, we would need a different URL
+            return Err("Linux automatic FFmpeg download not implemented".into());
+        }
+    };
+
+    // Create HTTP client with timeout
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+        .build()?;
+
+    // Create file paths outside the loop
+    let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
+
+    // Attempt download with retry logic
+    let mut last_error = None;
+    let mut downloaded_successfully = false;
+
+    for attempt in 1..=3 {
+        println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
+
+        match client.get(download_url).send().await {
+            Ok(response) => {
+                // Download was successful, proceed with saving
+                let total_size = response.content_length().unwrap_or(0);
+
+                if total_size > 0 {
+                    for (_window_label, window) in app.webview_windows() {
+                        let _ = window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0)));
+                    }
+                }
+
+                // Create a temporary file to save the download
+                let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
+
+                // Stream the download with progress tracking
+                let mut downloaded: u64 = 0;
+                let mut stream = response.bytes_stream();
+
+                while let Some(chunk_result) = stream.next().await {
+                    let chunk = chunk_result?;
+                    temp_file.write_all(&chunk).await?;
+                    downloaded += chunk.len() as u64;
+
+                    if total_size > 0 {
+                        let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                        for (_window_label, window) in app.webview_windows() {
+                            let _ = window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress));
+                        }
+                    }
+                }
+
+                temp_file.flush().await?;
+                drop(temp_file); // Close the file before processing
+                downloaded_successfully = true;
+                break; // Download successful, exit retry loop
+            }
+            Err(e) => {
+                eprintln!("Download attempt {} failed: {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 3 {
+                    // Wait before retrying (but not after the last attempt)
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    // If all attempts failed, return the last error
+    if !downloaded_successfully {
+        if let Some(error) = last_error {
+            return Err(error.into());
+        } else {
+            return Err("Download failed for unknown reasons".into());
+        }
+    }
+
+    // Extract the ZIP file
+    let zip_file = std::fs::File::open(&temp_zip_path)?;
+    let mut archive = zip::ZipArchive::new(zip_file)?;
+
+    // Look for the executable in the archive
+    let mut found_executable = false;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let filename = file.name().to_lowercase();
+
+        // Look for the executable file
+        if filename.ends_with(executable_name) {
+            // Extract this specific file to the target location
+            let mut output_file = File::create(ffmpeg_path)?;
+            std::io::copy(&mut file, &mut output_file)?;
+            output_file.sync_all()?;
+
+            // Make it executable on Unix systems (not needed on Windows)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
+            }
+
+            found_executable = true;
+            break;
+        }
+    }
+
+    // Delete the temporary ZIP file
+    std::fs::remove_file(&temp_zip_path)?;
+
+    if found_executable {
+        Ok(())
+    } else {
+        Err(format!("{} not found in the downloaded archive", executable_name).into())
+    }
+}
+
 
 #[tauri::command]
-async fn stop_combined_recording(window: tauri::Window) -> Result<String, String> {
-    let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
+    println!("Stop combined recording called");
 
-    if process_guard.is_none() {
-        return Ok("No recording in progress".to_string());
+    // First, handle the process termination without holding the mutex across await
+    {
+        let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+
+        if process_guard.is_none() {
+            println!("No recording in progress");
+            return Ok("No recording in progress".to_string());
+        }
+
+        // Kill the recording process
+        if let Some(child) = process_guard.as_mut() {
+            println!("Attempting to kill recording process");
+            match child.kill() {
+                Ok(_) => {
+                    println!("Successfully sent kill signal to process");
+                    // Wait for the process to finish
+                    match child.wait() {
+                        Ok(exit_status) => println!("Process exited with: {}", exit_status),
+                        Err(e) => println!("Error waiting for process: {}", e),
+                    }
+                },
+                Err(e) => println!("Error killing process: {}", e),
+            }
+        }
+
+        // Clear the recording process
+        *process_guard = None;
+        println!("Cleared recording process");
+    } // process_guard is dropped here
+
+    // Cancel the screenshot task if it exists
+    {
+        let mut task_guard = SCREENSHOT_TASK_HANDLE.lock().unwrap();
+        if let Some(task) = task_guard.take() {
+            task.abort();
+            println!("Screenshot task cancelled");
+        }
     }
 
-    // Kill the recording process
-    if let Some(child) = process_guard.as_mut() {
-        let _ = child.kill(); // Force kill the process
+    // Reset the paused state
+    RECORDING_PAUSED.store(false, Ordering::SeqCst);
+
+    // Brief delay to ensure tasks are cancelled before allowing new recording
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Update the UI in all windows
+    // Emit to each active window
+    for (_window_label, window) in app.webview_windows() {
+        let _ = window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.");
     }
-
-    // Clear the process
-    *process_guard = None;
-
-    // Update the UI
-    window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.").unwrap();
 
     Ok("Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.".to_string())
+}
+
+#[tauri::command]
+async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
+    // Set the paused flag
+    RECORDING_PAUSED.store(true, Ordering::SeqCst);
+
+    // Emit event to notify all UI windows
+    // Emit to each active window
+    for (_window_label, window) in app.webview_windows() {
+        let _ = window.emit("recording-paused", "Recording has been paused");
+    }
+
+    Ok("Recording paused successfully".to_string())
+}
+
+#[tauri::command]
+async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
+    // Clear the paused flag
+    RECORDING_PAUSED.store(false, Ordering::SeqCst);
+
+    // Emit event to notify all UI windows
+    // Emit to each active window
+    for (_window_label, window) in app.webview_windows() {
+        let _ = window.emit("recording-resumed", "Recording has been resumed");
+    }
+
+    Ok("Recording resumed successfully".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -936,7 +1187,9 @@ pub fn run() {
             add_excluded_window,
             remove_excluded_window,
             get_excluded_windows,
-            create_admin_window
+            create_admin_window,
+            pause_combined_recording,
+            resume_combined_recording
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

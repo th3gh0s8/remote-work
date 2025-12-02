@@ -1,21 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-let greetInputEl: HTMLInputElement | null;
-let greetMsgEl: HTMLElement | null;
 let recordBtn: HTMLButtonElement | null;
 let stopBtn: HTMLButtonElement | null;
 let screenshotStatus: HTMLElement | null;
 let activityBadge: HTMLElement | null;
-
-async function greet() {
-  if (greetMsgEl && greetInputEl) {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsgEl.textContent = await invoke("greet", {
-      name: greetInputEl.value,
-    });
-  }
-}
 
 async function startCombinedRecording() {
   if (recordBtn && stopBtn && screenshotStatus) {
@@ -139,6 +128,34 @@ listen("recording-finished", (event) => {
       }
     }
   }
+  // Update activity badge to stopped state
+  if (activityBadge) {
+    activityBadge.style.backgroundColor = '#f44336'; // Red color for stopped
+    activityBadge.style.boxShadow = '0 0 10px rgba(244, 67, 54, 0.7)'; // Red glow for stopped
+  }
+});
+
+listen("recording-paused", (event) => {
+  if (screenshotStatus) {
+    screenshotStatus.textContent = `Recording paused: ${event.payload}`;
+  }
+  // Update UI to reflect paused state (the recording is still "running" in a paused state)
+  // The stop button should remain visible but we should indicate it's paused
+  if (activityBadge) {
+    activityBadge.style.backgroundColor = '#FFC107'; // Yellow color for paused
+    activityBadge.style.boxShadow = '0 0 10px rgba(255, 193, 7, 0.7)'; // Yellow glow for paused
+  }
+});
+
+listen("recording-resumed", (event) => {
+  if (screenshotStatus) {
+    screenshotStatus.textContent = `Recording resumed: ${event.payload}`;
+  }
+  // Update UI to reflect resumed state
+  if (activityBadge) {
+    activityBadge.style.backgroundColor = '#2196F3'; // Blue color for recording
+    activityBadge.style.boxShadow = '0 0 10px rgba(33, 150, 243, 0.7)'; // Blue glow for recording
+  }
 });
 
 listen("recording-converted", (event) => {
@@ -154,17 +171,10 @@ listen("recording-error", (event) => {
 });
 
 window.addEventListener("DOMContentLoaded", () => {
-  greetInputEl = document.querySelector("#greet-input");
-  greetMsgEl = document.querySelector("#greet-msg");
   recordBtn = document.querySelector("#record-btn");
   stopBtn = document.querySelector("#stop-btn");
   screenshotStatus = document.querySelector("#screenshot-status");
   activityBadge = document.querySelector("#activity-badge");
-
-  document.querySelector("#greet-form")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    greet();
-  });
 
   recordBtn?.addEventListener("click", startCombinedRecording);
   stopBtn?.addEventListener("click", stopCombinedRecording);
@@ -236,8 +246,5 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Add button event listeners for admin controls
-  const adminWindowBtn = document.querySelector("#admin-window-btn") as HTMLButtonElement;
-
-  adminWindowBtn?.addEventListener("click", createAdminWindow);
+  // Removed admin button listener since button no longer exists in DOM
 });
