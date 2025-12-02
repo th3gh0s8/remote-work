@@ -1159,12 +1159,54 @@ async fn stop_all_processes(app: tauri::AppHandle) -> Result<String, String> {
         Err(e) => results.push(format!("Recording error: {}", e)),
     }
 
-    // Notify all windows
+    // Notify all windows that all processes have stopped
     for (_window_label, window) in app.webview_windows() {
         let _ = window.emit("all-processes-stopped", "All processes have been stopped");
+
+        // Also emit individual stop events for compatibility with existing UI elements
+        let _ = window.emit("recording-finished", "All processes stopped");
+        let _ = window.emit("screenshotting-finished", "Screenshotting stopped");
+
+        // Additionally, if idle detection was stopped, emit an active status
+        // since the user is no longer being monitored for inactivity
+        let _ = window.emit("user-active", "All processes stopped - user considered active");
     }
 
     Ok(format!("Stopped all processes:\n{}", results.join("\n")))
+}
+
+// Command to get the current status of all processes
+#[tauri::command]
+async fn get_process_status() -> Result<String, String> {
+    // Check if recording is in progress
+    let recording_in_progress = {
+        let process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+        process_guard.is_some()
+    };
+
+    // Check if screenshotting is in progress
+    let screenshotting_in_progress = {
+        let tasks = RUNNING_TASKS.lock().map_err(|e| e.to_string())?;
+        tasks.values().any(|status| match status {
+            TaskStatus::Active | TaskStatus::Stopping => true,
+            TaskStatus::Stopped => false,
+        })
+    };
+
+    // Check if idle detection is running
+    let idle_detection_running = {
+        let task_guard = IDLE_DETECTION_TASK.lock().map_err(|e| e.to_string())?;
+        task_guard.is_some()
+    };
+
+    let status_msg = format!(
+        "Recording: {}, Screenshotting: {}, Idle Detection: {}",
+        if recording_in_progress { "Active" } else { "Inactive" },
+        if screenshotting_in_progress { "Active" } else { "Inactive" },
+        if idle_detection_running { "Active" } else { "Inactive" }
+    );
+
+    Ok(status_msg)
 }
 
 #[tauri::command]
@@ -1221,6 +1263,7 @@ pub fn run() {
             start_combined_recording,
             stop_combined_recording,
             stop_all_processes,
+            get_process_status,
             update_user_activity,
             start_idle_detection,
             stop_idle_detection,
