@@ -8,6 +8,7 @@ use screenshots::Screen;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
+use sysinfo::{Networks};
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -646,12 +647,19 @@ lazy_static! {
         "options".to_lowercase(),
     ]));
 
-    // Global state to track network usage
+    // Global state to track application network usage
     static ref NETWORK_STATS: Arc<Mutex<NetworkUsage>> = Arc::new(Mutex::new(NetworkUsage {
         total_bytes_downloaded: 0,
         total_bytes_uploaded: 0,
         last_bytes_downloaded: 0,
         last_bytes_uploaded: 0,
+        last_updated: std::time::Instant::now(),
+    }));
+
+    // Global state to track system network usage
+    static ref GLOBAL_NETWORK_STATS: Arc<Mutex<GlobalNetworkUsage>> = Arc::new(Mutex::new(GlobalNetworkUsage {
+        last_total_bytes_downloaded: 0,
+        last_total_bytes_uploaded: 0,
         last_updated: std::time::Instant::now(),
     }));
 }
@@ -662,6 +670,13 @@ struct NetworkUsage {
     total_bytes_uploaded: u64,
     last_bytes_downloaded: u64,
     last_bytes_uploaded: u64,
+    last_updated: std::time::Instant,
+}
+
+#[derive(Clone)]
+struct GlobalNetworkUsage {
+    last_total_bytes_downloaded: u64,
+    last_total_bytes_uploaded: u64,
     last_updated: std::time::Instant,
 }
 
@@ -1677,9 +1692,69 @@ async fn get_network_stats() -> Result<String, String> {
     ))
 }
 
-// Command to update network stats (would be called from download/upload operations)
 #[tauri::command]
-async fn update_network_stats(downloaded_bytes: u64, uploaded_bytes: u64) -> Result<String, String> {
+async fn get_global_network_stats() -> Result<String, String> {
+    // Create a new Networks instance to get current network data
+    let networks = Networks::new_with_refreshed_list();
+
+    // Calculate total bytes across all network interfaces
+    let mut total_bytes_downloaded = 0;
+    let mut total_bytes_uploaded = 0;
+
+    for (interface_name, network) in networks.iter() {
+        // Skip loopback interfaces
+        if interface_name.to_lowercase().contains("lo") || interface_name.to_lowercase().contains("loopback") {
+            continue;
+        }
+        total_bytes_downloaded += network.total_received();
+        total_bytes_uploaded += network.total_transmitted();
+    }
+
+    let mut global_stats = GLOBAL_NETWORK_STATS.lock().unwrap();
+    let duration = global_stats.last_updated.elapsed().as_secs_f64();
+
+    // Calculate speeds (bytes per second)
+    let download_speed = if duration > 0.0 {
+        (total_bytes_downloaded - global_stats.last_total_bytes_downloaded) as f64 / duration
+    } else {
+        0.0
+    };
+
+    let upload_speed = if duration > 0.0 {
+        (total_bytes_uploaded - global_stats.last_total_bytes_uploaded) as f64 / duration
+    } else {
+        0.0
+    };
+
+    // Convert to appropriate units (KB/s or MB/s)
+    let download_speed_str = if download_speed > 1024.0 * 1024.0 {
+        format!("{:.2} MB/s", download_speed / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} KB/s", download_speed / 1024.0)
+    };
+
+    let upload_speed_str = if upload_speed > 1024.0 * 1024.0 {
+        format!("{:.2} MB/s", upload_speed / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} KB/s", upload_speed / 1024.0)
+    };
+
+    // Update last values for next calculation
+    global_stats.last_total_bytes_downloaded = total_bytes_downloaded;
+    global_stats.last_total_bytes_uploaded = total_bytes_uploaded;
+    global_stats.last_updated = std::time::Instant::now();
+
+    Ok(format!(r#"{{"downloadSpeed": "{}", "uploadSpeed": "{}", "totalDownloaded": "{}", "totalUploaded": "{}"}}"#,
+        download_speed_str,
+        upload_speed_str,
+        format!("{:.2} MB", total_bytes_downloaded as f64 / (1024.0 * 1024.0)),
+        format!("{:.2} MB", total_bytes_uploaded as f64 / (1024.0 * 1024.0))
+    ))
+}
+
+// Command to update network usage (would be called from download/upload operations)
+#[tauri::command]
+async fn update_network_usage(downloaded_bytes: u64, uploaded_bytes: u64) -> Result<String, String> {
     let mut stats = NETWORK_STATS.lock().unwrap();
 
     stats.total_bytes_downloaded += downloaded_bytes;
@@ -1690,7 +1765,7 @@ async fn update_network_stats(downloaded_bytes: u64, uploaded_bytes: u64) -> Res
     stats.last_bytes_uploaded = stats.total_bytes_uploaded;
     stats.last_updated = std::time::Instant::now();
 
-    Ok("Network stats updated successfully".to_string())
+    Ok("Network usage updated successfully".to_string())
 }
 
 #[tauri::command]
@@ -1767,7 +1842,8 @@ pub fn run() {
             get_screenshot_intervals,
             set_screenshot_intervals,
             get_network_stats,
-            update_network_stats
+            get_global_network_stats,
+            update_network_usage
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
