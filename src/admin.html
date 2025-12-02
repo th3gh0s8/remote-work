@@ -576,11 +576,12 @@
             </div>
 
             <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+              <button id="start-recording-btn" class="primary" title="Start combined recording and screenshotting" style="display: none;">Start Recording</button>
               <button id="save-options-btn" class="primary" title="Save all current settings">Save Options</button>
               <button id="reset-options-btn" class="outline" title="Reset all settings to default values">Reset to Defaults</button>
               <button id="pause-recording-btn" class="outline" title="Pause the current recording">Pause Recording</button>
               <button id="resume-recording-btn" class="outline" title="Resume the paused recording">Resume Recording</button>
-              <button id="stop-recording-btn" class="danger" title="Stop the current recording">Stop Recording</button>
+              <button id="stop-recording-btn" class="danger" title="Stop all processes (recording, screenshots, and idle detection)">Stop All Processes</button>
             </div>
           </div>
 
@@ -666,6 +667,7 @@
       const autoSave = document.getElementById('auto-save');
 
       // Recording control buttons
+      const startRecordingBtn = document.getElementById('start-recording-btn');
       const pauseRecordingBtn = document.getElementById('pause-recording-btn');
       const resumeRecordingBtn = document.getElementById('resume-recording-btn');
       const stopRecordingBtn = document.getElementById('stop-recording-btn');
@@ -785,10 +787,53 @@
         showStatus('Options reset to defaults!');
       }
 
-      // Update status information (placeholder function)
+      // Function to check the actual recording status from the backend
+      async function checkRecordingStatus() {
+        try {
+          // Get the actual process status from Rust
+          const status = await invoke('get_process_status');
+
+          // Parse the status string to determine recording state
+          const isRecording = status.includes('Recording: Active');
+          const isScreenshotting = status.includes('Screenshotting: Active');
+          const isIdleDetection = status.includes('Idle Detection: Active');
+
+          // Update the indicators based on actual status
+          if (isRecording || isScreenshotting) {
+            recordingStatusIndicator.textContent = 'Recording';
+            recordingStateIndicator.textContent = 'Active';
+            recordingStateIndicator.style.color = '#28a745'; // Green for active
+
+            // Show proper buttons based on recording status
+            if (startRecordingBtn) startRecordingBtn.style.display = 'none';
+            if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'inline-flex';
+            if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
+            if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
+          } else {
+            recordingStatusIndicator.textContent = 'Not Recording';
+            recordingStateIndicator.textContent = 'Inactive';
+            recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
+
+            // Show start button and hide others
+            if (startRecordingBtn) startRecordingBtn.style.display = 'inline-flex';
+            if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'none';
+            if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
+            if (stopRecordingBtn) stopRecordingBtn.style.display = 'none';
+          }
+
+          // Update the recording status in the status section
+          if (recordingStatus) {
+            recordingStatus.textContent = isRecording ? 'Active' : 'Not Recording';
+          }
+        } catch (error) {
+          console.error('Error checking recording status:', error);
+        }
+      }
+
+      // Update status information
       function updateStatus() {
         // In a real implementation, this would fetch actual status from the backend
-        recordingStatus.textContent = Math.random() > 0.7 ? 'Recording' : 'Not Recording';
+        recordingStatus.textContent = recordingStatusIndicator.textContent !== 'Inactive' ? 'Recording' : 'Not Recording';
         storageUsed.textContent = Math.floor(Math.random() * 5000) + ' MB';
         activeSessions.textContent = Math.floor(Math.random() * 5) + ' active';
       }
@@ -848,11 +893,30 @@
         }
       });
 
-      stopRecordingBtn?.addEventListener('click', async () => {
+      startRecordingBtn?.addEventListener('click', async () => {
         try {
-          const result = await invoke('stop_combined_recording');
+          const result = await invoke('start_combined_recording');
           showStatus(result);
           // Update button visibility
+          startRecordingBtn.style.display = 'none';
+          pauseRecordingBtn.style.display = 'inline-flex';
+          resumeRecordingBtn.style.display = 'none';
+          stopRecordingBtn.style.display = 'inline-flex';
+          // Update status indicators
+          recordingStatusIndicator.textContent = 'Recording';
+          recordingStateIndicator.textContent = 'Active';
+          recordingStateIndicator.style.color = '#28a745'; // Green for active
+        } catch (error) {
+          showStatus(`Error starting recording: ${error}`, false);
+        }
+      });
+
+      stopRecordingBtn?.addEventListener('click', async () => {
+        try {
+          const result = await invoke('stop_all_processes');
+          showStatus(result);
+          // Update button visibility
+          startRecordingBtn.style.display = 'inline-flex';
           pauseRecordingBtn.style.display = 'none';
           resumeRecordingBtn.style.display = 'none';
           stopRecordingBtn.style.display = 'none';
@@ -861,7 +925,7 @@
           recordingStateIndicator.textContent = 'Inactive';
           recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
         } catch (error) {
-          showStatus(`Error stopping recording: ${error}`, false);
+          showStatus(`Error stopping all processes: ${error}`, false);
         }
       });
 
@@ -909,7 +973,8 @@
           recordingStateIndicator.textContent = 'Active';
           recordingStateIndicator.style.color = '#28a745'; // Green for active
 
-          // Show pause and stop buttons, hide resume button
+          // Show pause and stop buttons, hide resume and start buttons
+          if (startRecordingBtn) startRecordingBtn.style.display = 'none';
           if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'inline-flex';
           if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
           if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
@@ -920,7 +985,8 @@
           recordingStateIndicator.textContent = 'Paused';
           recordingStateIndicator.style.color = '#ffc107'; // Yellow for paused
 
-          // Show resume and stop buttons, hide pause button
+          // Show resume and stop buttons, hide pause and start buttons
+          if (startRecordingBtn) startRecordingBtn.style.display = 'none';
           if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'none';
           if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'inline-flex';
           if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
@@ -931,7 +997,8 @@
           recordingStateIndicator.textContent = 'Active';
           recordingStateIndicator.style.color = '#28a745'; // Green for active
 
-          // Show pause and stop buttons, hide resume button
+          // Show pause and stop buttons, hide resume and start buttons
+          if (startRecordingBtn) startRecordingBtn.style.display = 'none';
           if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'inline-flex';
           if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
           if (stopRecordingBtn) stopRecordingBtn.style.display = 'inline-flex';
@@ -943,7 +1010,21 @@
           recordingStateIndicator.textContent = 'Inactive';
           recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
 
-          // Hide all recording control buttons
+          // Show start button and hide other recording control buttons
+          if (startRecordingBtn) startRecordingBtn.style.display = 'inline-flex';
+          if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'none';
+          if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
+          if (stopRecordingBtn) stopRecordingBtn.style.display = 'none';
+        });
+
+        // Listen for all processes stopped event
+        listen('all-processes-stopped', (event) => {
+          recordingStatusIndicator.textContent = 'Not Recording';
+          recordingStateIndicator.textContent = 'Inactive';
+          recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
+
+          // Show start button and hide other recording control buttons
+          if (startRecordingBtn) startRecordingBtn.style.display = 'inline-flex';
           if (pauseRecordingBtn) pauseRecordingBtn.style.display = 'none';
           if (resumeRecordingBtn) resumeRecordingBtn.style.display = 'none';
           if (stopRecordingBtn) stopRecordingBtn.style.display = 'none';
@@ -954,6 +1035,9 @@
         populateExcludedWindowsList();
         updateStatus();
 
+        // Check the actual process status from the backend
+        checkRecordingStatus();
+
         // Initially hide all sections except the first one
         document.querySelectorAll('.section').forEach((section, index) => {
           if (index !== 0) {
@@ -963,6 +1047,8 @@
 
         // Update status periodically
         setInterval(updateStatus, 5000);
+        // Also check actual process status periodically
+        setInterval(checkRecordingStatus, 2000);
 
         // Initially set status indicators
         recordingStatusIndicator.textContent = 'Not Recording';

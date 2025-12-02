@@ -170,6 +170,29 @@ listen("recording-error", (event) => {
   }
 });
 
+// Listen for all processes stopped event from Rust (when stopped from admin panel)
+listen("all-processes-stopped", (event) => {
+  if (screenshotStatus) {
+    screenshotStatus.textContent = `All processes stopped: ${event.payload}`;
+    // Reset buttons after all processes are stopped
+    if (recordBtn && stopBtn) {
+      if (recordBtn) {
+        recordBtn.style.display = "block";
+        recordBtn.disabled = false; // Ensure start button is not disabled
+      }
+      if (stopBtn) {
+        stopBtn.style.display = "none";
+        stopBtn.disabled = false;
+      }
+    }
+  }
+  // Update activity badge to stopped state
+  if (activityBadge) {
+    activityBadge.style.backgroundColor = '#f44336'; // Red color for stopped
+    activityBadge.style.boxShadow = '0 0 10px rgba(244, 67, 54, 0.7)'; // Red glow for stopped
+  }
+});
+
 window.addEventListener("DOMContentLoaded", () => {
   recordBtn = document.querySelector("#record-btn");
   stopBtn = document.querySelector("#stop-btn");
