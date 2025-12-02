@@ -6,6 +6,77 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Remote Worker</title>
     <script type="module" src="/src/main.ts" defer></script>
+    <style>
+      #record-btn {
+        background: linear-gradient(135deg, #27ae60, #2ecc71);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 10px 20px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(39, 174, 96, 0.4);
+        transition: all 0.3s ease;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        min-width: 100px;
+        height: 40px;
+      }
+
+      #record-btn:hover {
+        background: linear-gradient(135deg, #219653, #27ae60);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(39, 174, 96, 0.6);
+      }
+
+      #record-btn:active {
+        transform: translateY(0);
+        box-shadow: 0 1px 6px rgba(39, 174, 96, 0.4);
+      }
+
+      #record-btn:disabled {
+        background: #bdc3c7;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+
+      #stop-btn {
+        background: linear-gradient(135deg, #e74c3c, #c0392b);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 10px 20px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(231, 76, 60, 0.4);
+        transition: all 0.3s ease;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        min-width: 100px;
+        height: 40px;
+      }
+
+      #stop-btn:hover {
+        background: linear-gradient(135deg, #c0392b, #a93226);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(231, 76, 60, 0.6);
+      }
+
+      #stop-btn:active {
+        transform: translateY(0);
+        box-shadow: 0 1px 6px rgba(231, 76, 60, 0.4);
+      }
+
+      #stop-btn:disabled {
+        background: #bdc3c7;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+    </style>
   </head>
 
   <body>
@@ -37,6 +108,17 @@
               <h2 class="status-title">Status</h2>
             </div>
             <div id="screenshot-status">Ready to start recording...</div>
+
+            <!-- Network usage section -->
+            <div class="status-header" style="margin-top: 10px;">
+              <h2 class="status-title">Network</h2>
+            </div>
+            <div id="network-status">
+              <div>Download: <span id="download-speed">0 KB/s</span></div>
+              <div>Upload: <span id="upload-speed">0 KB/s</span></div>
+              <div>Total Downloaded: <span id="total-downloaded">0 MB</span></div>
+              <div>Total Uploaded: <span id="total-uploaded">0 MB</span></div>
+            </div>
           </div>
         </div>
 
