@@ -1,16 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { NetworkStatsComponent } from "./network-stats";
 
 let recordBtn: HTMLButtonElement | null;
 let stopBtn: HTMLButtonElement | null;
 let screenshotStatus: HTMLElement | null;
 let activityBadge: HTMLElement | null;
-
-// Network monitoring elements
-let downloadSpeedEl: HTMLElement | null;
-let uploadSpeedEl: HTMLElement | null;
-let totalDownloadedEl: HTMLElement | null;
-let totalUploadedEl: HTMLElement | null;
 
 async function startCombinedRecording() {
   if (recordBtn && stopBtn && screenshotStatus) {
@@ -266,32 +261,9 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Function to update network statistics display
-  async function updateNetworkStats() {
-    try {
-      const stats = await invoke('get_network_stats');
-      const statsObj = JSON.parse(stats as string);
-
-      if (downloadSpeedEl) downloadSpeedEl.textContent = statsObj.downloadSpeed;
-      if (uploadSpeedEl) uploadSpeedEl.textContent = statsObj.uploadSpeed;
-      if (totalDownloadedEl) totalDownloadedEl.textContent = statsObj.totalDownloaded;
-      if (totalUploadedEl) totalUploadedEl.textContent = statsObj.totalUploaded;
-    } catch (error) {
-      console.error("Error getting network stats:", error);
-    }
-  }
-
-  // Initialize network monitoring elements
-  downloadSpeedEl = document.querySelector("#download-speed");
-  uploadSpeedEl = document.querySelector("#upload-speed");
-  totalDownloadedEl = document.querySelector("#total-downloaded");
-  totalUploadedEl = document.querySelector("#total-uploaded");
-
-  // Update network stats periodically (every 2 seconds)
-  setInterval(updateNetworkStats, 2000);
-
-  // Initial update
-  updateNetworkStats();
+  // Initialize network stats component
+  const networkStats = new NetworkStatsComponent();
+  networkStats.start();
 
   async function createAdminWindow() {
     try {
