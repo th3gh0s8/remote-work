@@ -1128,6 +1128,45 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
     Ok("Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.".to_string())
 }
 
+// New command to stop all processes at once
+#[tauri::command]
+async fn stop_all_processes(app: tauri::AppHandle) -> Result<String, String> {
+    println!("Stopping all processes");
+
+    // Stop screenshotting (not async)
+    let screenshot_result = stop_screenshotting();
+
+    // Stop idle detection (async)
+    let idle_result = stop_idle_detection().await;
+
+    // Stop combined recording (async)
+    let recording_result = stop_combined_recording(app.clone()).await;
+
+    // Collect results
+    let mut results = Vec::new();
+    match screenshot_result {
+        Ok(msg) => results.push(format!("Screenshotting: {}", msg)),
+        Err(e) => results.push(format!("Screenshotting error: {}", e)),
+    }
+
+    match idle_result {
+        Ok(msg) => results.push(format!("Idle detection: {}", msg)),
+        Err(e) => results.push(format!("Idle detection error: {}", e)),
+    }
+
+    match recording_result {
+        Ok(msg) => results.push(format!("Recording: {}", msg)),
+        Err(e) => results.push(format!("Recording error: {}", e)),
+    }
+
+    // Notify all windows
+    for (_window_label, window) in app.webview_windows() {
+        let _ = window.emit("all-processes-stopped", "All processes have been stopped");
+    }
+
+    Ok(format!("Stopped all processes:\n{}", results.join("\n")))
+}
+
 #[tauri::command]
 async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
     // Set the paused flag
@@ -1181,6 +1220,7 @@ pub fn run() {
             stop_screenshotting,
             start_combined_recording,
             stop_combined_recording,
+            stop_all_processes,
             update_user_activity,
             start_idle_detection,
             stop_idle_detection,

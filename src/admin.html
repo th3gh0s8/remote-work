@@ -580,7 +580,7 @@
               <button id="reset-options-btn" class="outline" title="Reset all settings to default values">Reset to Defaults</button>
               <button id="pause-recording-btn" class="outline" title="Pause the current recording">Pause Recording</button>
               <button id="resume-recording-btn" class="outline" title="Resume the paused recording">Resume Recording</button>
-              <button id="stop-recording-btn" class="danger" title="Stop the current recording">Stop Recording</button>
+              <button id="stop-recording-btn" class="danger" title="Stop all processes (recording, screenshots, and idle detection)">Stop All Processes</button>
             </div>
           </div>
 
@@ -850,7 +850,7 @@
 
       stopRecordingBtn?.addEventListener('click', async () => {
         try {
-          const result = await invoke('stop_combined_recording');
+          const result = await invoke('stop_all_processes');
           showStatus(result);
           // Update button visibility
           pauseRecordingBtn.style.display = 'none';
@@ -861,7 +861,7 @@
           recordingStateIndicator.textContent = 'Inactive';
           recordingStateIndicator.style.color = '#dc3545'; // Red for inactive
         } catch (error) {
-          showStatus(`Error stopping recording: ${error}`, false);
+          showStatus(`Error stopping all processes: ${error}`, false);
         }
       });
 
