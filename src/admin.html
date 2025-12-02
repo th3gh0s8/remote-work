@@ -394,6 +394,74 @@
         background: var(--dark-bg);
       }
 
+      /* Maximization styles */
+      @media screen and (min-width: 1200px) {
+        .app-container {
+          max-width: 100%;
+          width: 100%;
+        }
+
+        .form-group {
+          min-width: 300px;
+          flex: 1 1 300px; /* Allow flex items to grow but with a base width */
+        }
+
+        .content-area {
+          padding: 25px;
+        }
+
+        .section {
+          padding: 25px;
+          margin-bottom: 25px;
+        }
+
+        /* Optimize sidebar for wider screens */
+        .nav-item {
+          padding: 14px 25px;
+        }
+
+        .status-card {
+          padding: 20px;
+        }
+
+        /* Enhance form layout for large screens */
+        .form-row {
+          gap: 25px;
+        }
+      }
+
+      /* Fullscreen/maximized window enhancements */
+      @media screen and (min-width: 1400px) {
+        .app-container {
+          border: none;
+          box-shadow: none;
+          height: 100vh;
+        }
+
+        .section {
+          max-width: 1200px;
+          margin-left: auto;
+          margin-right: auto;
+        }
+
+        .content-area {
+          padding: 30px 40px;
+        }
+
+        .form-group {
+          min-width: 350px;
+        }
+
+        .sidebar {
+          width: 280px;
+          padding: 25px 15px;
+        }
+
+        .nav-item {
+          margin: 5px 15px;
+        }
+      }
+
       /* Responsive design */
       @media (max-width: 992px) {
         .sidebar {
@@ -559,11 +627,23 @@
                 </div>
               </div>
 
-              <div class="form-group">
-                <label for="screenshot-interval">Screenshot Interval (minutes):</label>
-                <input type="number" id="screenshot-interval" min="1" max="60" value="15" title="Set the interval between screenshots in minutes">
-              </div>
+            </div>
 
+            <div class="form-row">
+              <div class="form-group">
+                <label for="screenshot-min-interval">Min Screenshot Interval (minutes):</label>
+                <input type="number" id="screenshot-min-interval" min="1" max="60" value="5" title="Minimum time between screenshots in minutes">
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="screenshot-max-interval">Max Screenshot Interval (minutes):</label>
+                <input type="number" id="screenshot-max-interval" min="1" max="120" value="30" title="Maximum time between screenshots in minutes">
+              </div>
+            </div>
+
+            <div class="form-row">
               <div class="form-group">
                 <label for="recording-quality">Recording Quality:</label>
                 <select id="recording-quality" title="Select the quality level for recordings">
@@ -659,7 +739,8 @@
       // Recording options elements
       const saveOptionsBtn = document.getElementById('save-options-btn');
       const resetOptionsBtn = document.getElementById('reset-options-btn');
-      const screenshotInterval = document.getElementById('screenshot-interval');
+      const screenshotMinInterval = document.getElementById('screenshot-min-interval');
+      const screenshotMaxInterval = document.getElementById('screenshot-max-interval');
       const recordingQuality = document.getElementById('recording-quality');
       const recordAudio = document.getElementById('record-audio');
       const recordWebcam = document.getElementById('record-webcam');
@@ -739,14 +820,23 @@
         }
       }
 
-      // Load recording options from storage (placeholder function)
-      function loadOptions() {
-        // In a real implementation, this would fetch from persistent storage
-        // For now, using defaults
+      // Load recording options from storage and from Rust backend
+      async function loadOptions() {
+        // First, load from persistent storage
         const options = JSON.parse(localStorage.getItem('recordingOptions') || '{}');
 
-        if (options.screenshotInterval) {
-          screenshotInterval.value = options.screenshotInterval;
+        if (options.screenshotMinInterval !== undefined) {
+          screenshotMinInterval.value = options.screenshotMinInterval;
+        } else if (options.screenshotInterval) {
+          // Fallback for old format - use the old value for min interval
+          screenshotMinInterval.value = Math.max(1, Math.floor(options.screenshotInterval / 2)); // Use half as default min
+        }
+
+        if (options.screenshotMaxInterval !== undefined) {
+          screenshotMaxInterval.value = options.screenshotMaxInterval;
+        } else if (options.screenshotInterval) {
+          // Fallback for old format - use the old value for max interval
+          screenshotMaxInterval.value = options.screenshotInterval * 2; // Use double as default max
         }
 
         if (options.recordingQuality) {
@@ -757,12 +847,42 @@
         recordWebcam.checked = options.recordWebcam !== undefined ? options.recordWebcam : true;
         hideCursor.checked = options.hideCursor !== undefined ? options.hideCursor : true;
         autoSave.checked = options.autoSave !== undefined ? options.autoSave : true;
+
+        // Then, fetch actual values from Rust backend to ensure UI shows current system state
+        try {
+          const intervalSettings = await invoke('get_screenshot_intervals');
+          const settings = JSON.parse(intervalSettings);
+
+          // Update UI values to match system settings (this will override stored values if they differ)
+          screenshotMinInterval.value = settings.min;
+          screenshotMaxInterval.value = settings.max;
+        } catch (error) {
+          console.error('Could not fetch screenshot intervals from backend:', error);
+          // Use fallback values if backend command fails
+          screenshotMinInterval.value = 5;  // Default min interval
+          screenshotMaxInterval.value = 30; // Default max interval
+        }
       }
 
-      // Save recording options to storage
-      function saveOptions() {
+      // Save recording options to storage and send to backend
+      async function saveOptions() {
+        const minVal = parseInt(screenshotMinInterval.value);
+        const maxVal = parseInt(screenshotMaxInterval.value);
+
+        // Validate values before saving
+        if (minVal >= maxVal) {
+          showStatus('Minimum interval must be less than maximum interval', false);
+          return;
+        }
+
+        if (minVal < 1 || maxVal > 120) {
+          showStatus('Intervals must be between 1 and 120 minutes', false);
+          return;
+        }
+
         const options = {
-          screenshotInterval: parseInt(screenshotInterval.value),
+          screenshotMinInterval: minVal,
+          screenshotMaxInterval: maxVal,
           recordingQuality: recordingQuality.value,
           recordAudio: recordAudio.checked,
           recordWebcam: recordWebcam.checked,
@@ -770,13 +890,26 @@
           autoSave: autoSave.checked
         };
 
+        // Save to local storage
         localStorage.setItem('recordingOptions', JSON.stringify(options));
-        showStatus('Options saved successfully!');
+
+        // Send to Rust backend
+        try {
+          await invoke('set_screenshot_intervals', {
+            min_minutes: minVal,
+            max_minutes: maxVal
+          });
+          showStatus('Options saved successfully!');
+        } catch (error) {
+          console.error('Error setting screenshot intervals in backend:', error);
+          showStatus(`Error saving options: ${error}`, false);
+        }
       }
 
       // Reset options to defaults
-      function resetOptions() {
-        screenshotInterval.value = 15;
+      async function resetOptions() {
+        screenshotMinInterval.value = 5;
+        screenshotMaxInterval.value = 30;
         recordingQuality.value = 'medium';
         recordAudio.checked = true;
         recordWebcam.checked = true;
@@ -784,7 +917,18 @@
         autoSave.checked = true;
 
         localStorage.removeItem('recordingOptions');
-        showStatus('Options reset to defaults!');
+
+        // Reset backend values as well
+        try {
+          await invoke('set_screenshot_intervals', {
+            min_minutes: 5,
+            max_minutes: 30
+          });
+          showStatus('Options reset to defaults!');
+        } catch (error) {
+          console.error('Error resetting screenshot intervals in backend:', error);
+          showStatus(`Error resetting options: ${error}`, false);
+        }
       }
 
       // Function to check the actual recording status from the backend
@@ -859,8 +1003,12 @@
 
       refreshListBtn.addEventListener('click', populateExcludedWindowsList);
 
-      saveOptionsBtn.addEventListener('click', saveOptions);
-      resetOptionsBtn.addEventListener('click', resetOptions);
+      saveOptionsBtn.addEventListener('click', async () => {
+        await saveOptions();
+      });
+      resetOptionsBtn.addEventListener('click', async () => {
+        await resetOptions();
+      });
 
       // Recording control button event listeners
       pauseRecordingBtn?.addEventListener('click', async () => {

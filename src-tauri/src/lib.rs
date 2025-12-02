@@ -8,7 +8,6 @@ use screenshots::Screen;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
-use image::Rgba;
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -26,6 +25,7 @@ use {
     std::os::windows::ffi::OsStringExt,
     std::os::windows::process::CommandExt,
 };
+
 
 
 #[derive(Clone, PartialEq)]
@@ -168,7 +168,8 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                                 // Black out the window area
                                                 for y in y1..y2 {
                                                     for x in x1..x2 {
-                                                        img.put_pixel(x, y, image::Rgba([0, 0, 0, 255])); // Black with full opacity
+                                                        use image::Rgba;
+                                                        img.put_pixel(x, y, Rgba([0, 0, 0, 255])); // Black with full opacity
                                                     }
                                                 }
                                             }
@@ -258,10 +259,17 @@ fn stop_screenshotting() -> Result<String, String> {
 // Global state to track combined recording status
 use std::process::{Child, Command};
 use tokio::task::JoinHandle;
+use std::collections::VecDeque;
 lazy_static! {
     static ref COMBINED_RECORDING_PROCESS: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
     static ref RECORDING_PAUSED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    static ref RECORDING_SEGMENT_FILES: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
     static ref SCREENSHOT_TASK_HANDLE: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    static ref FFMPEG_PROCESS_ID: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None)); // Store the PID for process control
+    static ref SCREENSHOT_MIN_INTERVAL: Arc<Mutex<u64>> = Arc::new(Mutex::new(300)); // Default 5 minutes in seconds
+    static ref SCREENSHOT_MAX_INTERVAL: Arc<Mutex<u64>> = Arc::new(Mutex::new(1800)); // Default 30 minutes in seconds
+    static ref RECORDING_BASE_PATH: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None)); // Store base recording path
+    static ref RECORDING_SESSION_ID: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None)); // Store session ID
 }
 
 
@@ -281,10 +289,29 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
     dir.push("recordings");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    // Create unique session IDs
+    // Create unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
-    let video_path = dir.join(format!("recording_{}.mkv", session_id));
-    let video_path_str = video_path.to_string_lossy().to_string();
+
+    // Store the session ID and base path
+    {
+        let mut session_guard = RECORDING_SESSION_ID.lock().unwrap();
+        *session_guard = Some(session_id.clone());
+    }
+
+    {
+        let mut path_guard = RECORDING_BASE_PATH.lock().unwrap();
+        *path_guard = Some(dir.to_string_lossy().to_string());
+    }
+
+    // Initialize segment files list
+    {
+        let mut files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.clear(); // Clear any old segment files
+    }
+
+    // Create the first segment - we'll later concatenate all segments
+    let first_segment_path = dir.join(format!("recording_{}_seg_0.mkv", session_id));
+    let video_path_str = first_segment_path.to_string_lossy().to_string();
 
     // Look for bundled FFmpeg first
     let ffmpeg_path = std::env::current_exe()
@@ -373,6 +400,18 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
     {
         let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
         *process_guard = Some(child);
+    }
+
+    // Add the first segment to the list of segments
+    {
+        let mut files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.push_back(video_path_str.clone());
+    }
+
+    // Store the process ID for potential pause/resume operations
+    {
+        let mut pid_guard = FFMPEG_PROCESS_ID.lock().unwrap();
+        *pid_guard = COMBINED_RECORDING_PROCESS.lock().unwrap().as_ref().map(|p| p.id());
     }
 
     // Clear any previous screenshot task handle
@@ -481,7 +520,8 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                                 // Black out the window area
                                                 for y in y1..y2 {
                                                     for x in x1..x2 {
-                                                        img.put_pixel(x, y, image::Rgba([0, 0, 0, 255])); // Black with full opacity
+                                                        use image::Rgba;
+                                                        img.put_pixel(x, y, Rgba([0, 0, 0, 255])); // Black with full opacity
                                                     }
                                                 }
                                             }
@@ -525,16 +565,32 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                 }
             }
 
-            // Generate a random interval between 5 and 30 minutes in seconds (300 to 1800 seconds)
+            // Generate a random interval using configurable min/max values
             let random_interval: u64 = {
                 use rand::Rng;
                 let mut rng = rand::thread_rng();
-                rng.gen_range(300..=1800) // 5 to 30 minutes in seconds
+                let min_interval = SCREENSHOT_MIN_INTERVAL.lock().unwrap();
+                let max_interval = SCREENSHOT_MAX_INTERVAL.lock().unwrap();
+                rng.gen_range(*min_interval..=*max_interval)
             };
 
             // Wait for the random interval before taking the next screenshot
-            // But check every second if recording is still active
+            // But check every second if recording is still active and not paused
             for remaining_seconds in (1..=random_interval).rev() {
+                // Check if we should pause during the waiting period
+                let is_paused = RECORDING_PAUSED.load(Ordering::SeqCst);
+                if is_paused {
+                    // If paused, wait in smaller increments and check the pause status more frequently
+                    for _ in 0..10 { // Check every 100ms during pause instead of every second
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        // Re-check pause status - if unpaused, resume the main waiting loop
+                        if !RECORDING_PAUSED.load(Ordering::SeqCst) {
+                            break; // Break the inner loop to continue the outer waiting loop
+                        }
+                    }
+                    continue; // Continue the outer waiting loop with the same remaining_seconds count
+                }
+
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
                 // Emit progress update about the remaining time to all windows
@@ -709,7 +765,9 @@ async fn create_admin_window(window: tauri::Window) -> Result<String, String> {
     )
     .title("Admin")
     .inner_size(800.0, 600.0)
+    .min_inner_size(600.0, 400.0)
     .resizable(true)
+    .maximizable(false)  // Prevent maximization
     .center()
     .build()
     .map_err(|e| format!("Failed to create admin window: {}", e))?;
@@ -741,7 +799,9 @@ async fn create_admin_window_internal(app_handle: &tauri::AppHandle) -> Result<S
     )
     .title("Admin")
     .inner_size(800.0, 600.0)
+    .min_inner_size(600.0, 400.0)
     .resizable(true)
+    .maximizable(false)  // Prevent maximization
     .center()
     .build()
     .map_err(|e| format!("Failed to create admin window: {}", e))?;
@@ -1070,38 +1130,168 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
 }
 
 
+// Helper function to concatenate video segments
+async fn concatenate_segments() -> Result<String, String> {
+    let session_id = {
+        let session_guard = RECORDING_SESSION_ID.lock().unwrap();
+        match session_guard.as_ref() {
+            Some(id) => id.clone(),
+            None => return Err("No recording session ID found".to_string()),
+        }
+    };
+
+    let base_path = {
+        let path_guard = RECORDING_BASE_PATH.lock().unwrap();
+        match path_guard.as_ref() {
+            Some(path) => path.clone(),
+            None => return Err("No recording path found".to_string()),
+        }
+    };
+
+    let segments: Vec<String> = {
+        let files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.iter().cloned().collect()
+    };
+
+    if segments.is_empty() {
+        return Ok("No segments to concatenate".to_string());
+    }
+
+    // Create the final output file path
+    let final_path = std::path::Path::new(&base_path).join(format!("recording_{}.mkv", session_id));
+    let final_path_str = final_path.to_string_lossy().to_string();
+
+    if segments.len() == 1 {
+        // If there's only one segment, just rename it to the final name
+        std::fs::rename(&segments[0], &final_path_str)
+            .map_err(|e| format!("Failed to rename segment file: {}", e))?;
+        return Ok(format!("Single segment renamed to final video: {}", final_path_str));
+    }
+
+    // Create a temporary file listing all segments
+    let concat_list_path = std::path::Path::new(&base_path).join("temp_concat_list.txt");
+    let mut concat_file_content = String::new();
+
+    for segment in &segments {
+        concat_file_content.push_str(&format!("file '{}'\n", segment.replace("'", "'\\'\"'\"\\''"))); // Properly escape for FFmpeg
+    }
+
+    std::fs::write(&concat_list_path, &concat_file_content)
+        .map_err(|e| format!("Failed to write concat list: {}", e))?;
+
+    // Look for FFmpeg
+    let ffmpeg_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap())
+        .join("ffmpeg.exe");
+
+    let ffmpeg_cmd = if ffmpeg_path.exists() {
+        ffmpeg_path.to_string_lossy().to_string()
+    } else {
+        // Check if system FFmpeg is available
+        match {
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("ffmpeg")
+                    .arg("-version")
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                    .output()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::process::Command::new("ffmpeg")
+                    .arg("-version")
+                    .output()
+            }
+        } {
+            Ok(_) => "ffmpeg".to_string(),
+            Err(_) => {
+                return Err("FFmpeg is required for concatenation but not found".to_string());
+            }
+        }
+    };
+
+    // Run FFmpeg to concatenate the segments
+    let output = {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", &concat_list_path.to_string_lossy(),
+                    "-c", "copy",
+                    "-y", // Overwrite output file
+                    &final_path_str
+                ])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .output()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", &concat_list_path.to_string_lossy(),
+                    "-c", "copy",
+                    "-y", // Overwrite output file
+                    &final_path_str
+                ])
+                .output()
+        }
+    };
+
+    // Clean up the temporary list file
+    let _ = std::fs::remove_file(&concat_list_path);
+
+    match output {
+        Ok(result) => {
+            if result.status.success() {
+                // Remove individual segment files after successful concatenation
+                for segment in &segments {
+                    let _ = std::fs::remove_file(segment);
+                }
+                Ok(format!("Segments concatenated successfully: {}", final_path_str))
+            } else {
+                let error_msg = String::from_utf8_lossy(&result.stderr);
+                Err(format!("FFmpeg concatenation failed: {}", error_msg))
+            }
+        }
+        Err(e) => Err(format!("Error running FFmpeg concatenation: {}", e)),
+    }
+}
+
 #[tauri::command]
 async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
     println!("Stop combined recording called");
 
-    // First, handle the process termination without holding the mutex across await
+    // Stop the current recording process if it's running
     {
         let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
 
-        if process_guard.is_none() {
-            println!("No recording in progress");
-            return Ok("No recording in progress".to_string());
-        }
-
-        // Kill the recording process
-        if let Some(child) = process_guard.as_mut() {
-            println!("Attempting to kill recording process");
-            match child.kill() {
-                Ok(_) => {
-                    println!("Successfully sent kill signal to process");
-                    // Wait for the process to finish
-                    match child.wait() {
-                        Ok(exit_status) => println!("Process exited with: {}", exit_status),
-                        Err(e) => println!("Error waiting for process: {}", e),
-                    }
-                },
-                Err(e) => println!("Error killing process: {}", e),
+        if process_guard.is_some() {
+            // Kill the recording process
+            if let Some(child) = process_guard.as_mut() {
+                println!("Attempting to kill recording process");
+                match child.kill() {
+                    Ok(_) => {
+                        println!("Successfully sent kill signal to process");
+                        // Wait for the process to finish
+                        match child.wait() {
+                            Ok(exit_status) => println!("Process exited with: {}", exit_status),
+                            Err(e) => println!("Error waiting for process: {}", e),
+                        }
+                    },
+                    Err(e) => println!("Error killing process: {}", e),
+                }
             }
-        }
 
-        // Clear the recording process
-        *process_guard = None;
-        println!("Cleared recording process");
+            // Clear the recording process
+            *process_guard = None;
+            println!("Cleared recording process");
+        }
     } // process_guard is dropped here
 
     // Cancel the screenshot task if it exists
@@ -1113,8 +1303,27 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
         }
     }
 
+    // Concatenate all segments into the final video
+    let concat_result = concatenate_segments().await;
+
     // Reset the paused state
     RECORDING_PAUSED.store(false, Ordering::SeqCst);
+
+    // Clear session information
+    {
+        let mut session_guard = RECORDING_SESSION_ID.lock().unwrap();
+        *session_guard = None;
+    }
+
+    {
+        let mut path_guard = RECORDING_BASE_PATH.lock().unwrap();
+        *path_guard = None;
+    }
+
+    {
+        let mut files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.clear();
+    }
 
     // Brief delay to ensure tasks are cancelled before allowing new recording
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1125,7 +1334,10 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
         let _ = window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.");
     }
 
-    Ok("Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.".to_string())
+    match concat_result {
+        Ok(msg) => Ok(format!("Combined recording stopped and {} Video file is being finalized, please wait a few seconds before opening.", msg)),
+        Err(e) => Err(format!("Recording stopped but concatenation failed: {}", e)),
+    }
 }
 
 // New command to stop all processes at once
@@ -1209,8 +1421,163 @@ async fn get_process_status() -> Result<String, String> {
     Ok(status_msg)
 }
 
+
+// Helper function to stop the current FFmpeg process and save the segment
+async fn stop_current_recording_segment() -> Result<(), String> {
+    let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+
+    if let Some(mut child) = process_guard.take() {
+        // Try to terminate the process gracefully first
+        match child.kill() {
+            Ok(_) => {
+                println!("Successfully sent kill signal to recording process");
+                // Wait for the process to finish
+                match child.wait() {
+                    Ok(exit_status) => println!("Process exited with: {}", exit_status),
+                    Err(e) => println!("Error waiting for process: {}", e),
+                }
+            },
+            Err(e) => println!("Error killing process: {}", e),
+        }
+    }
+
+    Ok(())
+}
+
+// Helper function to start a new FFmpeg segment
+async fn start_new_recording_segment() -> Result<String, String> {
+    // Get the session info
+    let session_id = {
+        let session_guard = RECORDING_SESSION_ID.lock().unwrap();
+        match session_guard.as_ref() {
+            Some(id) => id.clone(),
+            None => return Err("No recording session is active".to_string()),
+        }
+    };
+
+    let base_path = {
+        let path_guard = RECORDING_BASE_PATH.lock().unwrap();
+        match path_guard.as_ref() {
+            Some(path) => path.clone(),
+            None => return Err("No recording path is set".to_string()),
+        }
+    };
+
+    // Get the next segment index
+    let segment_index = {
+        let files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.len()
+    };
+
+    // Create the path for the new segment
+    let segment_path = std::path::Path::new(&base_path).join(format!("recording_{}_seg_{}.mkv", session_id, segment_index));
+    let video_path_str = segment_path.to_string_lossy().to_string();
+
+    // Look for bundled FFmpeg first
+    let ffmpeg_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap())
+        .join("ffmpeg.exe");
+
+    let ffmpeg_cmd = if ffmpeg_path.exists() {
+        ffmpeg_path.to_string_lossy().to_string()
+    } else {
+        // Check if system FFmpeg is available
+        match {
+            #[cfg(target_os = "windows")]
+            {
+                std::process::Command::new("ffmpeg")
+                    .arg("-version")
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                    .output()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                std::process::Command::new("ffmpeg")
+                    .arg("-version")
+                    .output()
+            }
+        } {
+            Ok(_) => "ffmpeg".to_string(),
+            Err(_) => {
+                return Err("FFmpeg is required for recording but not found".to_string());
+            }
+        }
+    };
+
+    // Start the video recording process with FFmpeg for the new segment
+    let child = {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "gdigrab",
+                    "-i", "desktop",
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .creation_flags(0x08000000) // CREATE_NO_WINDOW flag
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "gdigrab",
+                    "-i", "desktop",
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+    };
+
+    // Update the recording process
+    {
+        let mut process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+        *process_guard = Some(child);
+    }
+
+    // Store the process ID
+    {
+        let mut pid_guard = FFMPEG_PROCESS_ID.lock().unwrap();
+        *pid_guard = COMBINED_RECORDING_PROCESS.lock().unwrap().as_ref().map(|p| p.id());
+    }
+
+    // Add the new segment to the list
+    {
+        let mut files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.push_back(video_path_str.clone());
+    }
+
+    Ok(format!("Started new recording segment: {}", video_path_str))
+}
+
 #[tauri::command]
 async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
+    // Check if there's actually a recording in progress before pausing
+    {
+        let process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+        if process_guard.is_none() {
+            return Err("No recording in progress to pause".to_string());
+        }
+        // Don't drop the guard yet, just checking
+    }
+
+    // Stop the current recording segment
+    stop_current_recording_segment().await?;
+
     // Set the paused flag
     RECORDING_PAUSED.store(true, Ordering::SeqCst);
 
@@ -1220,11 +1587,28 @@ async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
         let _ = window.emit("recording-paused", "Recording has been paused");
     }
 
-    Ok("Recording paused successfully".to_string())
+    Ok("Recording paused successfully - segment saved".to_string())
 }
 
 #[tauri::command]
 async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, String> {
+    // Check if there's a recording session but no active process (meaning it's paused)
+    {
+        let process_guard = COMBINED_RECORDING_PROCESS.lock().map_err(|e| e.to_string())?;
+        if process_guard.is_some() {
+            // If there's an active process, it means we're not paused
+            return Err("Recording is not paused, cannot resume".to_string());
+        }
+        // Also check if we have a session ID to confirm we're in a recording session
+        let session_guard = RECORDING_SESSION_ID.lock().unwrap();
+        if session_guard.is_none() {
+            return Err("No recording session is active".to_string());
+        }
+    }
+
+    // Start a new recording segment
+    let result = start_new_recording_segment().await?;
+
     // Clear the paused flag
     RECORDING_PAUSED.store(false, Ordering::SeqCst);
 
@@ -1234,7 +1618,42 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
         let _ = window.emit("recording-resumed", "Recording has been resumed");
     }
 
-    Ok("Recording resumed successfully".to_string())
+    Ok(format!("Recording resumed successfully - {}", result))
+}
+
+#[tauri::command]
+async fn get_screenshot_intervals() -> Result<String, String> {
+    let min_interval = SCREENSHOT_MIN_INTERVAL.lock().unwrap();
+    let max_interval = SCREENSHOT_MAX_INTERVAL.lock().unwrap();
+
+    Ok(format!("{{\"min\": {}, \"max\": {}}}", *min_interval / 60, *max_interval / 60)) // Return in minutes
+}
+
+#[tauri::command]
+async fn set_screenshot_intervals(min_minutes: u64, max_minutes: u64) -> Result<String, String> {
+    if min_minutes >= max_minutes {
+        return Err("Minimum interval must be less than maximum interval".to_string());
+    }
+
+    if min_minutes < 1 || max_minutes > 120 {
+        return Err("Intervals must be between 1 and 120 minutes".to_string());
+    }
+
+    // Convert minutes to seconds
+    let min_seconds = min_minutes * 60;
+    let max_seconds = max_minutes * 60;
+
+    {
+        let mut min_guard = SCREENSHOT_MIN_INTERVAL.lock().unwrap();
+        *min_guard = min_seconds;
+    }
+
+    {
+        let mut max_guard = SCREENSHOT_MAX_INTERVAL.lock().unwrap();
+        *max_guard = max_seconds;
+    }
+
+    Ok(format!("Screenshot intervals updated: min {} min, max {} min", min_minutes, max_minutes))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1272,7 +1691,9 @@ pub fn run() {
             get_excluded_windows,
             create_admin_window,
             pause_combined_recording,
-            resume_combined_recording
+            resume_combined_recording,
+            get_screenshot_intervals,
+            set_screenshot_intervals
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
