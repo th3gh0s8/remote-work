@@ -180,6 +180,37 @@
         margin-bottom: 0;
       }
 
+      .form-group.half-width {
+        min-width: 120px; /* Reduced minimum width for compact form elements */
+        flex: 0 1 calc(50% - 10px); /* Take up half the space minus gap */
+      }
+
+      .form-group.compact {
+        min-width: 180px; /* Even more compact for single elements like dropdowns */
+        flex: 0 1 auto; /* Allow to shrink as needed */
+      }
+
+      .form-group.third-width {
+        min-width: 120px; /* Minimum width for elements in 3-column layout */
+        flex: 0 1 calc(33.333% - 14px); /* Take up one-third of the space minus gaps */
+      }
+
+      .input-with-unit {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .unit-label {
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
+        padding: 8px 10px;
+        background-color: #444;
+        border-radius: var(--border-radius);
+        height: fit-content;
+      }
+
       label {
         display: block;
         margin-bottom: 6px;
@@ -630,21 +661,23 @@
             </div>
 
             <div class="form-row">
-              <div class="form-group">
-                <label for="screenshot-min-interval">Min Screenshot Interval (minutes):</label>
-                <input type="number" id="screenshot-min-interval" min="1" max="60" value="5" title="Minimum time between screenshots in minutes">
+              <div class="form-group third-width">
+                <label for="screenshot-min-interval">Min Screenshot Interval:</label>
+                <div class="input-with-unit">
+                  <input type="number" id="screenshot-min-interval" min="1" max="60" value="5" title="Minimum time between screenshots in minutes">
+                  <span class="unit-label">minutes</span>
+                </div>
               </div>
-            </div>
 
-            <div class="form-row">
-              <div class="form-group">
-                <label for="screenshot-max-interval">Max Screenshot Interval (minutes):</label>
-                <input type="number" id="screenshot-max-interval" min="1" max="120" value="30" title="Maximum time between screenshots in minutes">
+              <div class="form-group third-width">
+                <label for="screenshot-max-interval">Max Screenshot Interval:</label>
+                <div class="input-with-unit">
+                  <input type="number" id="screenshot-max-interval" min="1" max="120" value="30" title="Maximum time between screenshots in minutes">
+                  <span class="unit-label">minutes</span>
+                </div>
               </div>
-            </div>
 
-            <div class="form-row">
-              <div class="form-group">
+              <div class="form-group third-width">
                 <label for="recording-quality">Recording Quality:</label>
                 <select id="recording-quality" title="Select the quality level for recordings">
                   <option value="low">Low (faster, smaller files)</option>
