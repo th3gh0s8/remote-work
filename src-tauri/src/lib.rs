@@ -5,11 +5,13 @@ use tokio::time::{Duration, Instant};
 use std::fs;
 use lazy_static::lazy_static;
 use screenshots::Screen;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
 use sysinfo::{Networks};
 mod database;
+
+
 
 // Windows-specific imports for system-wide idle detection
 #[cfg(target_os = "windows")]
@@ -860,7 +862,6 @@ use EXCLUDED_WINDOWS as RUNNING_EXCLUDED_WINDOWS;
 
 
 
-use tauri::Manager;
 
 #[cfg(target_os = "windows")]
 mod windows_utils {
@@ -1063,13 +1064,9 @@ fn get_system_idle_status() -> Result<String, String> {
             // Get the current tick count
             let current_tick = GetTickCount();
 
-            // Calculate the idle time in milliseconds
-            let idle_time_ms = if current_tick >= last_input_tick {
-                current_tick - last_input_tick
-            } else {
-                // Handle potential tick count wraparound (very rare, would take weeks)
-                (0xFFFFFFFF - last_input_tick) + current_tick
-            };
+            // Calculate the idle time in milliseconds, handling potential tick count wraparound
+            // GetTickCount returns a u32 that wraps around after about 49.7 days
+            let idle_time_ms = (current_tick as u32).wrapping_sub(last_input_tick as u32);
 
             let idle_time_seconds = idle_time_ms / 1000;
 
@@ -1121,8 +1118,9 @@ async fn start_system_idle_monitoring(app_handle: tauri::AppHandle) -> Result<St
 
                         // Update cached status
                         {
-                            let mut cached_status = LAST_IDLE_STATUS.lock().unwrap();
-                            *cached_status = current_status.to_string();
+                            if let Ok(mut cached_status) = LAST_IDLE_STATUS.lock() {
+                                *cached_status = current_status.to_string();
+                            }
                         }
 
                         // Emit idle status update to all windows
@@ -1150,6 +1148,12 @@ async fn start_system_idle_monitoring(app_handle: tauri::AppHandle) -> Result<St
     }
 
     Ok("System idle monitoring started".to_string())
+}
+
+#[tauri::command]
+fn get_cached_idle_status() -> Result<String, String> {
+    let cached_status = LAST_IDLE_STATUS.lock().map_err(|e| format!("Failed to acquire idle status lock: {}", e))?;
+    Ok(cached_status.clone())
 }
 
 #[tauri::command]
@@ -2196,7 +2200,7 @@ async fn get_global_network_stats() -> Result<String, String> {
         total_bytes_uploaded += network.total_transmitted();
     }
 
-    let mut global_stats = GLOBAL_NETWORK_STATS.lock().unwrap();
+    let mut global_stats = GLOBAL_NETWORK_STATS.lock().map_err(|e| format!("Failed to acquire global network stats lock: {}", e))?;
     let duration = global_stats.last_updated.elapsed().as_secs_f64();
 
     // Calculate speeds (bytes per second)
@@ -2449,9 +2453,23 @@ pub fn run() {
                 .build()
         })
         .setup(|app| {
-            // Always create the main window, but it will decide what content to show
-            // based on user ID status through JavaScript
+            // Create the main window when the app starts
             create_main_window(app.handle())?;
+
+            // Add event listener to handle window close event (x button)
+            if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Prevent the window from closing
+                        api.prevent_close();
+
+                        // Hide the window instead of closing it
+                        let _ = window_clone.hide();
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2466,6 +2484,7 @@ pub fn run() {
             update_user_activity,
             get_user_idle_status,
             get_system_idle_status,
+            get_cached_idle_status,
             start_system_idle_monitoring,
             stop_system_idle_monitoring,
             start_idle_detection,

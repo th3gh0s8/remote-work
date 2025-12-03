@@ -518,6 +518,16 @@ async function stopSystemIdleMonitoring(): Promise<void> {
   }
 }
 
+// Function to fetch and update the cached idle status directly
+async function updateCachedIdleStatus(): Promise<void> {
+  try {
+    const cachedStatus = await invoke("get_cached_idle_status");
+    updateIdleUI(cachedStatus as string);
+  } catch (error) {
+    console.error('Error fetching cached idle status:', error);
+  }
+}
+
 // Function to update UI based on idle status
 function updateIdleUI(status: string): void {
   const activityBadge = document.getElementById("activity-badge");
@@ -550,5 +560,45 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   } catch (error) {
     console.error('Error setting up idle status listener:', error);
+  }
+
+  // Listen for monitoring commands from system tray
+  try {
+    await listen("start-monitoring-request", () => {
+      startSystemIdleMonitoring();
+      console.log("Monitoring started via system tray");
+    });
+
+    await listen("stop-monitoring-request", () => {
+      stopSystemIdleMonitoring();
+      console.log("Monitoring stopped via system tray");
+    });
+  } catch (error) {
+    console.error('Error setting up monitoring command listeners:', error);
+  }
+
+  // Set up periodic check of cached status (every 3 seconds) to handle throttling
+  setInterval(async () => {
+    await updateCachedIdleStatus();
+  }, 3000);  // Check every 3 seconds
+});
+
+// Add keyboard shortcuts for window control
+document.addEventListener('keydown', (event) => {
+  // Ctrl+H to hide the window to system tray
+  if (event.ctrlKey && event.key === 'h') {
+    event.preventDefault();
+    if (window.__TAURI__) {
+      window.__TAURI__.webviewWindow.getCurrent().hide();
+    }
+  }
+
+  // Ctrl+Shift+H to show the window
+  if (event.ctrlKey && event.shiftKey && event.key === 'H') {
+    event.preventDefault();
+    if (window.__TAURI__) {
+      window.__TAURI__.webviewWindow.getCurrent().show();
+      window.__TAURI__.webviewWindow.getCurrent().setFocus();
+    }
   }
 });
