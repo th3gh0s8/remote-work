@@ -28,6 +28,99 @@ lazy_static! {
     };
 }
 
+// Function to create a new user in the database
+pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = DB_POOL.get_conn()?;
+
+    conn.exec_drop(
+        "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
+        (
+            user_id,
+            username.unwrap_or(""),
+            email.unwrap_or(""),
+            username.unwrap_or(""),
+            email.unwrap_or("")
+        )
+    )?;
+
+    Ok(())
+}
+
+// Function to get user by user_id
+pub fn get_user(user_id: &str) -> Result<Option<UserInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = DB_POOL.get_conn()?;
+
+    let result: Option<UserInfo> = conn
+        .exec_first(
+            "SELECT id, user_id, username, email, created_at, updated_at, is_active FROM users WHERE user_id = ?",
+            (user_id,)
+        )?
+        .map(|(id, db_user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, bool)| {
+            UserInfo {
+                id,
+                user_id: db_user_id,
+                username,
+                email,
+                created_at,
+                updated_at,
+                is_active,
+            }
+        });
+
+    Ok(result)
+}
+
+// Function to check if a user exists
+pub fn user_exists(user_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = DB_POOL.get_conn()?;
+
+    let result: Option<u32> = conn.exec_first(
+        "SELECT id FROM users WHERE user_id = ?",
+        (user_id,)
+    )?;
+
+    Ok(result.is_some())
+}
+
+// Function to get all users
+pub fn get_all_users(limit: Option<u32>) -> Result<Vec<UserInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut conn = DB_POOL.get_conn()?;
+
+    if let Some(lim) = limit {
+        Ok(conn.exec_map(
+            "SELECT id, user_id, username, email, created_at, updated_at, is_active FROM users ORDER BY created_at DESC LIMIT ?",
+            (lim,),
+            |(id, user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, bool)| {
+                UserInfo {
+                    id,
+                    user_id,
+                    username,
+                    email,
+                    created_at,
+                    updated_at,
+                    is_active,
+                }
+            }
+        )?)
+    } else {
+        Ok(conn.exec_map(
+            "SELECT id, user_id, username, email, created_at, updated_at, is_active FROM users ORDER BY created_at DESC",
+            (),
+            |(id, user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, bool)| {
+                UserInfo {
+                    id,
+                    user_id,
+                    username,
+                    email,
+                    created_at,
+                    updated_at,
+                    is_active,
+                }
+            }
+        )?)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     pub user: String,
@@ -69,39 +162,61 @@ impl DatabaseConfig {
 // Initialize database tables
 fn initialize_database(pool: &Pool) {
     let mut conn = pool.get_conn().expect("Failed to get database connection");
-    
+
+    // Create users table first (since other tables reference it)
+    conn.query_drop(
+        "CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL UNIQUE,
+            username VARCHAR(255),
+            email VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT TRUE,
+            INDEX idx_user_id (user_id)
+        )"
+    ).expect("Failed to create users table");
+
     // Create screenshots table
     conn.query_drop(
         "CREATE TABLE IF NOT EXISTS screenshots (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
             session_id VARCHAR(255) NOT NULL,
-            image_data LONGBLOB NOT NULL,
+            image_data LONGBLOB,
             filename VARCHAR(255) NOT NULL,
+            file_path VARCHAR(500),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id),
             INDEX idx_session_id (session_id),
             INDEX idx_created_at (created_at)
         )"
     ).expect("Failed to create screenshots table");
-    
+
     // Create recordings table
     conn.query_drop(
         "CREATE TABLE IF NOT EXISTS recordings (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
             session_id VARCHAR(255) NOT NULL,
             filename VARCHAR(255) NOT NULL,
             file_path VARCHAR(500),
             duration_seconds INT,
             file_size BIGINT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id),
             INDEX idx_session_id (session_id),
             INDEX idx_created_at (created_at)
         )"
     ).expect("Failed to create recordings table");
-    
+
     // Create recording segments table
     conn.query_drop(
         "CREATE TABLE IF NOT EXISTS recording_segments (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
             recording_id INT,
             segment_number INT NOT NULL,
             filename VARCHAR(255) NOT NULL,
@@ -109,31 +224,39 @@ fn initialize_database(pool: &Pool) {
             duration_seconds INT,
             file_size BIGINT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
             FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id),
             INDEX idx_recording_id (recording_id)
         )"
     ).expect("Failed to create recording_segments table");
-    
+
     // Create user_activity table
     conn.query_drop(
         "CREATE TABLE IF NOT EXISTS user_activity (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
             activity_type ENUM('active', 'idle') NOT NULL,
             duration_seconds INT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id),
             INDEX idx_timestamp (timestamp)
         )"
     ).expect("Failed to create user_activity table");
-    
+
     // Create network_usage table
     conn.query_drop(
         "CREATE TABLE IF NOT EXISTS network_usage (
             id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
             download_speed VARCHAR(50),
             upload_speed VARCHAR(50),
             total_downloaded VARCHAR(50),
             total_uploaded VARCHAR(50),
             recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+            INDEX idx_user_id (user_id),
             INDEX idx_recorded_at (recorded_at)
         )"
     ).expect("Failed to create network_usage table");
@@ -165,20 +288,30 @@ fn initialize_database(pool: &Pool) {
     ).expect("Failed to insert initial process status");
 }
 
-// Function to save screenshot to database
-pub fn save_screenshot_to_db(session_id: &str, image_data: Vec<u8>, filename: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+// Function to save screenshot metadata to database
+pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, filename: &str, file_size: Option<i64>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
-    
+
+    // Ensure user exists in the users table
+    create_user(user_id, None, None)?;
+
     conn.exec_drop(
-        "INSERT INTO screenshots (session_id, image_data, filename) VALUES (?, ?, ?)",
-        (session_id, image_data, filename)
+        "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
+        (
+            user_id,
+            session_id,
+            file_path,
+            filename,
+            file_size.unwrap_or(0)
+        )
     )?;
-    
+
     Ok(())
 }
 
 // Function to save recording metadata to database
 pub fn save_recording_to_db(
+    user_id: &str,
     session_id: &str,
     filename: &str,
     file_path: Option<&str>,
@@ -187,9 +320,13 @@ pub fn save_recording_to_db(
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
+    // Ensure user exists in the users table
+    create_user(user_id, None, None)?;
+
     conn.exec_drop(
-        "INSERT INTO recordings (session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO recordings (user_id, session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
         (
+            user_id,
             session_id,
             filename,
             file_path.unwrap_or(""),
@@ -217,6 +354,7 @@ pub fn get_recording_id_by_session(session_id: &str) -> Result<Option<u64>, Box<
 
 // Function to save recording segment to database
 pub fn save_recording_segment_to_db(
+    user_id: &str,
     recording_id: u64,
     segment_number: i32,
     filename: &str,
@@ -226,9 +364,13 @@ pub fn save_recording_segment_to_db(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
+    // Ensure user exists in the users table
+    create_user(user_id, None, None)?;
+
     conn.exec_drop(
-        "INSERT INTO recording_segments (recording_id, segment_number, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO recording_segments (user_id, recording_id, segment_number, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
+            user_id,
             recording_id,
             segment_number,
             filename,
@@ -308,31 +450,38 @@ pub fn update_recording_metadata_in_db(
 }
 
 // Function to save user activity to database
-pub fn save_user_activity_to_db(activity_type: &str, duration_seconds: Option<i32>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub fn save_user_activity_to_db(user_id: &str, activity_type: &str, duration_seconds: Option<i32>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
-    
+
+    // Ensure user exists in the users table
+    create_user(user_id, None, None)?;
+
     conn.exec_drop(
-        "INSERT INTO user_activity (activity_type, duration_seconds) VALUES (?, ?)",
-        (activity_type, duration_seconds.unwrap_or(0))
+        "INSERT INTO user_activity (user_id, activity_type, duration_seconds) VALUES (?, ?, ?)",
+        (user_id, activity_type, duration_seconds.unwrap_or(0))
     )?;
-    
+
     Ok(())
 }
 
 // Function to save network usage to database
 pub fn save_network_usage_to_db(
+    user_id: &str,
     download_speed: &str,
     upload_speed: &str,
     total_downloaded: &str,
     total_uploaded: &str
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
-    
+
+    // Ensure user exists in the users table
+    create_user(user_id, None, None)?;
+
     conn.exec_drop(
-        "INSERT INTO network_usage (download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?)",
-        (download_speed, upload_speed, total_downloaded, total_uploaded)
+        "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
+        (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
     )?;
-    
+
     Ok(())
 }
 
@@ -389,18 +538,20 @@ pub fn update_process_status_in_db(
 }
 
 // Function to get screenshots by session ID from database
-pub fn get_screenshots_by_session(session_id: &str) -> Result<Vec<ScreenshotData>, Box<dyn std::error::Error + Send + Sync>> {
+pub fn get_screenshots_by_session(user_id: &str, session_id: &str) -> Result<Vec<ScreenshotData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
     let result: Vec<ScreenshotData> = conn
         .exec_map(
-            "SELECT id, session_id, filename, created_at FROM screenshots WHERE session_id = ? ORDER BY created_at DESC",
-            (session_id,),
-            |(id, session_id_db, filename, created_at): (u32, String, String, String)| {
+            "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? AND session_id = ? ORDER BY created_at DESC",
+            (user_id, session_id),
+            |(id, session_id_db, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
                 ScreenshotData {
                     id,
                     session_id: session_id_db,
+                    file_path,
                     filename,
+                    file_size,
                     created_at,
                 }
             }
@@ -409,47 +560,51 @@ pub fn get_screenshots_by_session(session_id: &str) -> Result<Vec<ScreenshotData
     Ok(result)
 }
 
-// Function to get all screenshots from database
-pub fn get_all_screenshots(limit: Option<u32>) -> Result<Vec<ScreenshotData>, Box<dyn std::error::Error + Send + Sync>> {
+// Function to get all screenshots from database for a specific user
+pub fn get_all_screenshots(user_id: &str, limit: Option<u32>) -> Result<Vec<ScreenshotData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
-    let query = if let Some(lim) = limit {
-        format!("SELECT id, session_id, filename, created_at FROM screenshots ORDER BY created_at DESC LIMIT {}", lim)
-    } else {
-        "SELECT id, session_id, filename, created_at FROM screenshots ORDER BY created_at DESC".to_string()
-    };
-
-    let result: Vec<ScreenshotData> = conn
-        .exec_map(
-            query.as_str(),
-            (),
-            |(id, session_id, filename, created_at): (u32, String, String, String)| {
+    if let Some(lim) = limit {
+        Ok(conn.exec_map(
+            "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, lim),
+            |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
                 ScreenshotData {
                     id,
                     session_id,
+                    file_path,
                     filename,
+                    file_size,
                     created_at,
                 }
             }
-        )?;
-
-    Ok(result)
+        )?)
+    } else {
+        Ok(conn.exec_map(
+            "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+            |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
+                ScreenshotData {
+                    id,
+                    session_id,
+                    file_path,
+                    filename,
+                    file_size,
+                    created_at,
+                }
+            }
+        )?)
+    }
 }
 
-// Function to get recordings from database
-pub fn get_recordings(limit: Option<u32>) -> Result<Vec<RecordingData>, Box<dyn std::error::Error + Send + Sync>> {
+// Function to get recordings from database for a specific user
+pub fn get_recordings(user_id: &str, limit: Option<u32>) -> Result<Vec<RecordingData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
-    let query = if let Some(lim) = limit {
-        format!("SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings ORDER BY created_at DESC LIMIT {}", lim)
-    } else {
-        "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings ORDER BY created_at DESC".to_string()
-    };
-
-    let result: Vec<RecordingData> = conn
-        .exec_map(
-            query.as_str(),
-            (),
+    if let Some(lim) = limit {
+        Ok(conn.exec_map(
+            "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (user_id, lim),
             |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
                 RecordingData {
                     id,
@@ -461,25 +616,34 @@ pub fn get_recordings(limit: Option<u32>) -> Result<Vec<RecordingData>, Box<dyn 
                     created_at,
                 }
             }
-        )?;
-
-    Ok(result)
+        )?)
+    } else {
+        Ok(conn.exec_map(
+            "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+            |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
+                RecordingData {
+                    id,
+                    session_id,
+                    filename,
+                    file_path,
+                    duration_seconds,
+                    file_size,
+                    created_at,
+                }
+            }
+        )?)
+    }
 }
 
-// Function to get user activity from database
-pub fn get_user_activity(limit: Option<u32>) -> Result<Vec<UserActivityData>, Box<dyn std::error::Error + Send + Sync>> {
+// Function to get user activity from database for a specific user
+pub fn get_user_activity(user_id: &str, limit: Option<u32>) -> Result<Vec<UserActivityData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
-    let query = if let Some(lim) = limit {
-        format!("SELECT id, activity_type, duration_seconds, timestamp FROM user_activity ORDER BY timestamp DESC LIMIT {}", lim)
-    } else {
-        "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity ORDER BY timestamp DESC".to_string()
-    };
-
-    let result: Vec<UserActivityData> = conn
-        .exec_map(
-            query.as_str(),
-            (),
+    if let Some(lim) = limit {
+        Ok(conn.exec_map(
+            "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (user_id, lim),
             |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
                 UserActivityData {
                     id,
@@ -488,25 +652,31 @@ pub fn get_user_activity(limit: Option<u32>) -> Result<Vec<UserActivityData>, Bo
                     timestamp,
                 }
             }
-        )?;
-
-    Ok(result)
+        )?)
+    } else {
+        Ok(conn.exec_map(
+            "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC",
+            (user_id,),
+            |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
+                UserActivityData {
+                    id,
+                    activity_type,
+                    duration_seconds,
+                    timestamp,
+                }
+            }
+        )?)
+    }
 }
 
-// Function to get network usage from database
-pub fn get_network_usage(limit: Option<u32>) -> Result<Vec<NetworkUsageData>, Box<dyn std::error::Error + Send + Sync>> {
+// Function to get network usage from database for a specific user
+pub fn get_network_usage(user_id: &str, limit: Option<u32>) -> Result<Vec<NetworkUsageData>, Box<dyn std::error::Error + Send + Sync>> {
     let mut conn = DB_POOL.get_conn()?;
 
-    let query = if let Some(lim) = limit {
-        format!("SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage ORDER BY recorded_at DESC LIMIT {}", lim)
-    } else {
-        "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage ORDER BY recorded_at DESC".to_string()
-    };
-
-    let result: Vec<NetworkUsageData> = conn
-        .exec_map(
-            query.as_str(),
-            (),
+    if let Some(lim) = limit {
+        Ok(conn.exec_map(
+            "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage WHERE user_id = ? ORDER BY recorded_at DESC LIMIT ?",
+            (user_id, lim),
             |(id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at): (u32, String, String, String, String, String)| {
                 NetworkUsageData {
                     id,
@@ -517,9 +687,35 @@ pub fn get_network_usage(limit: Option<u32>) -> Result<Vec<NetworkUsageData>, Bo
                     recorded_at,
                 }
             }
-        )?;
+        )?)
+    } else {
+        Ok(conn.exec_map(
+            "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage WHERE user_id = ? ORDER BY recorded_at DESC",
+            (user_id,),
+            |(id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at): (u32, String, String, String, String, String)| {
+                NetworkUsageData {
+                    id,
+                    download_speed,
+                    upload_speed,
+                    total_downloaded,
+                    total_uploaded,
+                    recorded_at,
+                }
+            }
+        )?)
+    }
+}
 
-    Ok(result)
+// Data structure for user information
+#[derive(Debug, serde::Serialize)]
+pub struct UserInfo {
+    pub id: u32,
+    pub user_id: String,
+    pub username: Option<String>,
+    pub email: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub is_active: bool,
 }
 
 // Data structures for returning data from database
@@ -527,7 +723,9 @@ pub fn get_network_usage(limit: Option<u32>) -> Result<Vec<NetworkUsageData>, Bo
 pub struct ScreenshotData {
     pub id: u32,
     pub session_id: String,
+    pub file_path: String,
     pub filename: String,
+    pub file_size: Option<i64>,
     pub created_at: String,  // Using String as it's coming from SQL TIMESTAMP
 }
 
