@@ -38,5 +38,6 @@ rand = "0.8"
 windows = "0.52"
 winapi = { version = "0.3", features = ["winuser", "windef", "minwindef", "libloaderapi", "processthreadsapi"] }
 sysinfo = "0.30"
+mysql = "24.0"
 
 
