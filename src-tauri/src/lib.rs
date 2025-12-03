@@ -9,6 +9,7 @@ use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
 use sysinfo::{Networks};
+mod database;
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -178,15 +179,21 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                     }
                                 }
 
-                                let timestamp = start_time.elapsed().as_millis();
-                                let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
-                                let filepath = dir.join(&filename);
+                                // Convert image to bytes for storage in MySQL
+                                let mut img_bytes: Vec<u8> = Vec::new();
+                                if let Ok(_) = img.write_to(&mut std::io::Cursor::new(&mut img_bytes), image::ImageFormat::Png) {
+                                    let timestamp = start_time.elapsed().as_millis();
+                                    let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
 
-                                if let Err(e) = img.save(&filepath) {
-                                    eprintln!("Failed to save screenshot: {}", e);
+                                    // Save screenshot to MySQL database
+                                    if let Err(e) = database::save_screenshot_to_db(&session_id_clone, img_bytes, &filename) {
+                                        eprintln!("Failed to save screenshot to database: {}", e);
+                                    } else {
+                                        // Notify that screenshot was taken
+                                        window.emit("screenshot-taken", format!("Screenshot saved to database: {}", filename)).unwrap();
+                                    }
                                 } else {
-                                    // Notify that screenshot was taken
-                                    window.emit("screenshot-taken", format!("Screenshot saved: {}", filename)).unwrap();
+                                    eprintln!("Failed to convert image to bytes");
                                 }
                             }
                             Err(e) => {
@@ -409,6 +416,17 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
         files_guard.push_back(video_path_str.clone());
     }
 
+    // Save the main recording metadata to database
+    if let Err(e) = database::save_recording_to_db(
+        &session_id,
+        &format!("recording_{}.mkv", session_id),
+        Some(&video_path_str),
+        None, // Duration not known yet
+        None  // File size not known yet
+    ) {
+        eprintln!("Failed to save recording metadata to database: {}", e);
+    }
+
     // Store the process ID for potential pause/resume operations
     {
         let mut pid_guard = FFMPEG_PROCESS_ID.lock().unwrap();
@@ -530,27 +548,28 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                     }
                                 }
 
-                                // Create screenshots directory
-                                let mut screenshots_dir = std::env::current_dir().unwrap();
-                                screenshots_dir.push("screenshots");
-                                std::fs::create_dir_all(&screenshots_dir).unwrap();
+                                // Convert image to bytes for storage in MySQL
+                                let mut img_bytes: Vec<u8> = Vec::new();
+                                if let Ok(_) = img.write_to(&mut std::io::Cursor::new(&mut img_bytes), image::ImageFormat::Png) {
+                                    let timestamp = start_time.elapsed().as_millis();
+                                    let filename = format!("snapshot_{}_{}.png", screenshot_session_id, timestamp);
 
-                                let timestamp = start_time.elapsed().as_millis();
-                                let filename = format!("snapshot_{}_{}.png", screenshot_session_id, timestamp);
-                                let filepath = screenshots_dir.join(&filename);
-
-                                if let Err(e) = img.save(&filepath) {
-                                    eprintln!("Failed to save snapshot: {}", e);
+                                    // Save snapshot to MySQL database
+                                    if let Err(e) = database::save_screenshot_to_db(&screenshot_session_id, img_bytes, &filename) {
+                                        eprintln!("Failed to save snapshot to database: {}", e);
+                                    } else {
+                                        // Emit to all windows for screenshot
+                                        for (_window_label, window) in app_for_screenshot.webview_windows() {
+                                            let _ = window.emit("screenshot-taken", format!("Snapshot saved to database: {}", filename));
+                                        }
+                                        // Note: Keeping event name as screenshot-taken for compatibility
+                                        // Update user activity since a snapshot was just taken (user is likely active)
+                                        if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+                                            *last_activity = SystemTime::now();
+                                        }
+                                    }
                                 } else {
-                                    // Emit to all windows for screenshot
-                                    for (_window_label, window) in app_for_screenshot.webview_windows() {
-                                        let _ = window.emit("screenshot-taken", format!("Snapshot saved: {}", filename));
-                                    }
-                                    // Note: Keeping event name as screenshot-taken for compatibility
-                                    // Update user activity since a snapshot was just taken (user is likely active)
-                                    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
-                                        *last_activity = SystemTime::now();
-                                    }
+                                    eprintln!("Failed to convert image to bytes");
                                 }
                             }
                             Err(e) => {
@@ -867,14 +886,26 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
 
             if let Ok(last_activity) = LAST_USER_ACTIVITY.lock() {
                 if let Ok(elapsed) = last_activity.elapsed() {
-                    let idle_duration_minutes = elapsed.as_secs() / 60;
+                    let idle_duration_seconds = elapsed.as_secs() as i32;
 
-                    if idle_duration_minutes >= 5 {  // If idle for 5+ minutes
-                        window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_minutes)).unwrap();
+                    if idle_duration_seconds >= 300 {  // If idle for 5+ minutes (300 seconds)
+                        window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_seconds / 60)).unwrap();
+                        // Save idle activity to database
+                        if let Err(e) = database::save_user_activity_to_db("idle", Some(idle_duration_seconds)) {
+                            eprintln!("Failed to save user idle activity to database: {}", e);
+                        }
                     } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds
                         window_clone.emit("user-idle", format!("User has been idle for {} seconds", elapsed.as_secs())).unwrap();
+                        // Save idle activity to database
+                        if let Err(e) = database::save_user_activity_to_db("idle", Some(idle_duration_seconds)) {
+                            eprintln!("Failed to save user idle activity to database: {}", e);
+                        }
                     } else {  // User is active
                         window_clone.emit("user-active", format!("User active, last activity {} seconds ago", elapsed.as_secs())).unwrap();
+                        // Save active activity to database
+                        if let Err(e) = database::save_user_activity_to_db("active", Some(elapsed.as_secs() as i32)) {
+                            eprintln!("Failed to save user active activity to database: {}", e);
+                        }
                     }
                 }
             }
@@ -1336,11 +1367,33 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
         }
     }
 
+    // Get session ID before clearing it to use for database updates
+    let session_id_clone = {
+        let session_guard = RECORDING_SESSION_ID.lock().unwrap();
+        session_guard.clone()
+    };
+
     // Concatenate all segments into the final video
     let concat_result = concatenate_segments().await;
 
     // Reset the paused state
     RECORDING_PAUSED.store(false, Ordering::SeqCst);
+
+    // If concatenation was successful, update the recording entry in the database
+    // with the final file location and size
+    if concat_result.is_ok() {
+        if let Some(session_id) = session_id_clone {
+            if let Err(e) = database::update_recording_metadata_in_db(
+                &session_id,
+                Some(&format!("recording_{}.mkv", session_id)),
+                None, // We could pass the final file path if available
+                None, // Duration would require calculating from segments
+                None  // File size would need to be calculated after concatenation
+            ) {
+                eprintln!("Failed to update recording metadata in database: {}", e);
+            }
+        }
+    }
 
     // Clear session information
     {
@@ -1594,6 +1647,36 @@ async fn start_new_recording_segment() -> Result<String, String> {
         files_guard.push_back(video_path_str.clone());
     }
 
+    // Get the main recording ID from the database
+    let recording_id = match database::get_recording_id_by_session(&session_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            eprintln!("Failed to find main recording for session: {}", session_id);
+            0  // Use placeholder if not found
+        },
+        Err(e) => {
+            eprintln!("Error getting recording ID from database: {}", e);
+            0  // Use placeholder if error
+        }
+    };
+
+    // Save recording segment metadata to database
+    let segment_index = {
+        let files_guard = RECORDING_SEGMENT_FILES.lock().unwrap();
+        files_guard.len() - 1  // Current index is length - 1
+    };
+
+    if let Err(e) = database::save_recording_segment_to_db(
+        recording_id,
+        segment_index as i32,
+        &format!("recording_{}_seg_{}.mkv", session_id, segment_index),
+        Some(&video_path_str),
+        None, // Duration not known yet
+        None  // File size not known yet
+    ) {
+        eprintln!("Failed to save recording segment metadata to database: {}", e);
+    }
+
     Ok(format!("Started new recording segment: {}", video_path_str))
 }
 
@@ -1765,6 +1848,46 @@ async fn update_network_usage(downloaded_bytes: u64, uploaded_bytes: u64) -> Res
     stats.last_bytes_uploaded = stats.total_bytes_uploaded;
     stats.last_updated = std::time::Instant::now();
 
+    // Convert bytes to appropriate units for display
+    let total_downloaded_mb = format!("{:.2} MB", stats.total_bytes_downloaded as f64 / (1024.0 * 1024.0));
+    let total_uploaded_mb = format!("{:.2} MB", stats.total_bytes_uploaded as f64 / (1024.0 * 1024.0));
+
+    // Calculate speeds (bytes per second)
+    let duration = stats.last_updated.elapsed().as_secs_f64();
+    let download_speed = if duration > 0.0 {
+        (stats.total_bytes_downloaded - stats.last_bytes_downloaded) as f64 / duration
+    } else {
+        0.0
+    };
+    let upload_speed = if duration > 0.0 {
+        (stats.total_bytes_uploaded - stats.last_bytes_uploaded) as f64 / duration
+    } else {
+        0.0
+    };
+
+    // Convert speeds to appropriate units
+    let download_speed_str = if download_speed > 1024.0 * 1024.0 {
+        format!("{:.2} MB/s", download_speed / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} KB/s", download_speed / 1024.0)
+    };
+
+    let upload_speed_str = if upload_speed > 1024.0 * 1024.0 {
+        format!("{:.2} MB/s", upload_speed / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} KB/s", upload_speed / 1024.0)
+    };
+
+    // Save network usage to database
+    if let Err(e) = database::save_network_usage_to_db(
+        &download_speed_str,
+        &upload_speed_str,
+        &total_downloaded_mb,
+        &total_uploaded_mb
+    ) {
+        eprintln!("Failed to save network usage to database: {}", e);
+    }
+
     Ok("Network usage updated successfully".to_string())
 }
 
@@ -1801,6 +1924,73 @@ async fn set_screenshot_intervals(min_minutes: u64, max_minutes: u64) -> Result<
     }
 
     Ok(format!("Screenshot intervals updated: min {} min, max {} min", min_minutes, max_minutes))
+}
+
+// Database retrieval commands for admin interface
+
+#[tauri::command]
+async fn get_screenshots_by_session(session_id: String) -> Result<String, String> {
+    match database::get_screenshots_by_session(&session_id) {
+        Ok(screenshots) => {
+            match serde_json::to_string(&screenshots) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize screenshots: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("Failed to get screenshots from database: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn get_all_screenshots(limit: Option<u32>) -> Result<String, String> {
+    match database::get_all_screenshots(limit) {
+        Ok(screenshots) => {
+            match serde_json::to_string(&screenshots) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize screenshots: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("Failed to get screenshots from database: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn get_recordings(limit: Option<u32>) -> Result<String, String> {
+    match database::get_recordings(limit) {
+        Ok(recordings) => {
+            match serde_json::to_string(&recordings) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize recordings: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("Failed to get recordings from database: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn get_user_activity(limit: Option<u32>) -> Result<String, String> {
+    match database::get_user_activity(limit) {
+        Ok(activity) => {
+            match serde_json::to_string(&activity) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize user activity: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("Failed to get user activity from database: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn get_network_usage(limit: Option<u32>) -> Result<String, String> {
+    match database::get_network_usage(limit) {
+        Ok(usage) => {
+            match serde_json::to_string(&usage) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize network usage: {}", e)),
+            }
+        }
+        Err(e) => Err(format!("Failed to get network usage from database: {}", e)),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1843,7 +2033,12 @@ pub fn run() {
             set_screenshot_intervals,
             get_network_stats,
             get_global_network_stats,
-            update_network_usage
+            update_network_usage,
+            get_screenshots_by_session,
+            get_all_screenshots,
+            get_recordings,
+            get_user_activity,
+            get_network_usage
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
