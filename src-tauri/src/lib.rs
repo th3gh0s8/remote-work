@@ -113,7 +113,7 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let mut img = img;
+                                let img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -482,7 +482,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let mut img = img;
+                                let img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -938,7 +938,7 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
     use futures_util::StreamExt;
 
     // Determine the appropriate FFmpeg build based on the platform
-    let (download_url, executable_name) = {
+    let (download_url, executable_name): (&'static str, &'static str) = {
         #[cfg(target_os = "windows")]
         {
             ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
@@ -1066,7 +1066,7 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
     use futures_util::StreamExt;
 
     // Determine the appropriate FFmpeg build based on the platform
-    let (download_url, executable_name) = {
+    let (download_url, executable_name): (&'static str, &'static str) = {
         #[cfg(target_os = "windows")]
         {
             ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
