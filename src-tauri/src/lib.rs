@@ -198,7 +198,7 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let mut img = img;
+                                let img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -608,7 +608,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let mut img = img;
+                                let img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -1256,126 +1256,125 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
     use futures_util::StreamExt;
 
     // Determine the appropriate FFmpeg build based on the platform
-    let (download_url, executable_name) = {
-        #[cfg(target_os = "windows")]
-        {
-            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // For macOS, we would need a different URL
-            return Err("macOS automatic FFmpeg download not implemented".into());
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // For Linux, we would need a different URL
-            return Err("Linux automatic FFmpeg download not implemented".into());
-        }
-    };
+    #[cfg(target_os = "windows")]
+    {
+        let (download_url, executable_name): (&str, &str) =
+            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe");
 
-    // Create HTTP client with timeout
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
-        .build()?;
+        // Create HTTP client with timeout
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+            .build()?;
 
-    // Create file paths outside the loop
-    let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
+        // Create file paths outside the loop
+        let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
 
-    // Attempt download with retry logic
-    let mut last_error = None;
-    let mut downloaded_successfully = false;
+        // Attempt download with retry logic
+        let mut last_error = None;
+        let mut downloaded_successfully = false;
 
-    for attempt in 1..=3 {
-        println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
+        for attempt in 1..=3 {
+            println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
 
-        match client.get(download_url).send().await {
-            Ok(response) => {
-                // Download was successful, proceed with saving
-                let total_size = response.content_length().unwrap_or(0);
-
-                if total_size > 0 {
-                    window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0))).unwrap();
-                }
-
-                // Create a temporary file to save the download
-                let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
-
-                // Stream the download with progress tracking
-                let mut downloaded: u64 = 0;
-                let mut stream = response.bytes_stream();
-
-                while let Some(chunk_result) = stream.next().await {
-                    let chunk = chunk_result?;
-                    temp_file.write_all(&chunk).await?;
-                    downloaded += chunk.len() as u64;
+            match client.get(download_url).send().await {
+                Ok(response) => {
+                    // Download was successful, proceed with saving
+                    let total_size = response.content_length().unwrap_or(0);
 
                     if total_size > 0 {
-                        let progress = (downloaded as f64 / total_size as f64) * 100.0;
-                        window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress)).unwrap();
+                        window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0))).unwrap();
+                    }
+
+                    // Create a temporary file to save the download
+                    let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
+
+                    // Stream the download with progress tracking
+                    let mut downloaded: u64 = 0;
+                    let mut stream = response.bytes_stream();
+
+                    while let Some(chunk_result) = stream.next().await {
+                        let chunk = chunk_result?;
+                        temp_file.write_all(&chunk).await?;
+                        downloaded += chunk.len() as u64;
+
+                        if total_size > 0 {
+                            let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                            window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress)).unwrap();
+                        }
+                    }
+
+                    temp_file.flush().await?;
+                    drop(temp_file); // Close the file before processing
+                    downloaded_successfully = true;
+                    break; // Download successful, exit retry loop
+                }
+                Err(e) => {
+                    eprintln!("Download attempt {} failed: {}", attempt, e);
+                    last_error = Some(e);
+                    if attempt < 3 {
+                        // Wait before retrying (but not after the last attempt)
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
                 }
-
-                temp_file.flush().await?;
-                drop(temp_file); // Close the file before processing
-                downloaded_successfully = true;
-                break; // Download successful, exit retry loop
             }
-            Err(e) => {
-                eprintln!("Download attempt {} failed: {}", attempt, e);
-                last_error = Some(e);
-                if attempt < 3 {
-                    // Wait before retrying (but not after the last attempt)
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // If all attempts failed, return the last error
+        if !downloaded_successfully {
+            if let Some(error) = last_error {
+                return Err(error.into());
+            } else {
+                return Err("Download failed for unknown reasons".into());
+            }
+        }
+
+        // Extract the ZIP file
+        let zip_file = std::fs::File::open(&temp_zip_path)?;
+        let mut archive = zip::ZipArchive::new(zip_file)?;
+
+        // Look for the executable in the archive
+        let mut found_executable = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let filename = file.name().to_lowercase();
+
+            // Look for the executable file
+            if filename.ends_with(executable_name) {
+                // Extract this specific file to the target location
+                let mut output_file = File::create(ffmpeg_path)?;
+                std::io::copy(&mut file, &mut output_file)?;
+                output_file.sync_all()?;
+
+                // Make it executable on Unix systems (not needed on Windows)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
                 }
+
+                found_executable = true;
+                break;
             }
         }
-    }
 
-    // If all attempts failed, return the last error
-    if !downloaded_successfully {
-        if let Some(error) = last_error {
-            return Err(error.into());
+        // Delete the temporary ZIP file
+        std::fs::remove_file(&temp_zip_path)?;
+
+        if found_executable {
+            Ok(())
         } else {
-            return Err("Download failed for unknown reasons".into());
+            Err(format!("{} not found in the downloaded archive", executable_name).into())
         }
     }
-
-    // Extract the ZIP file
-    let zip_file = std::fs::File::open(&temp_zip_path)?;
-    let mut archive = zip::ZipArchive::new(zip_file)?;
-
-    // Look for the executable in the archive
-    let mut found_executable = false;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let filename = file.name().to_lowercase();
-
-        // Look for the executable file
-        if filename.ends_with(executable_name) {
-            // Extract this specific file to the target location
-            let mut output_file = File::create(ffmpeg_path)?;
-            std::io::copy(&mut file, &mut output_file)?;
-            output_file.sync_all()?;
-
-            // Make it executable on Unix systems (not needed on Windows)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
-            }
-
-            found_executable = true;
-            break;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        // For macOS, we would need a different URL
+        return Err("macOS automatic FFmpeg download not implemented".into());
     }
-
-    // Delete the temporary ZIP file
-    std::fs::remove_file(&temp_zip_path)?;
-
-    if found_executable {
-        Ok(())
-    } else {
-        Err(format!("{} not found in the downloaded archive", executable_name).into())
+    #[cfg(target_os = "linux")]
+    {
+        // For Linux, we would need a different URL
+        return Err("Linux automatic FFmpeg download not implemented".into());
     }
 }
 
@@ -1384,130 +1383,129 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
     use futures_util::StreamExt;
 
     // Determine the appropriate FFmpeg build based on the platform
-    let (download_url, executable_name) = {
-        #[cfg(target_os = "windows")]
-        {
-            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // For macOS, we would need a different URL
-            return Err("macOS automatic FFmpeg download not implemented".into());
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // For Linux, we would need a different URL
-            return Err("Linux automatic FFmpeg download not implemented".into());
-        }
-    };
+    #[cfg(target_os = "windows")]
+    {
+        let (download_url, executable_name): (&str, &str) =
+            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe");
 
-    // Create HTTP client with timeout
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
-        .build()?;
+        // Create HTTP client with timeout
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+            .build()?;
 
-    // Create file paths outside the loop
-    let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
+        // Create file paths outside the loop
+        let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
 
-    // Attempt download with retry logic
-    let mut last_error = None;
-    let mut downloaded_successfully = false;
+        // Attempt download with retry logic
+        let mut last_error = None;
+        let mut downloaded_successfully = false;
 
-    for attempt in 1..=3 {
-        println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
+        for attempt in 1..=3 {
+            println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
 
-        match client.get(download_url).send().await {
-            Ok(response) => {
-                // Download was successful, proceed with saving
-                let total_size = response.content_length().unwrap_or(0);
-
-                if total_size > 0 {
-                    for (_window_label, window) in app.webview_windows() {
-                        let _ = window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0)));
-                    }
-                }
-
-                // Create a temporary file to save the download
-                let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
-
-                // Stream the download with progress tracking
-                let mut downloaded: u64 = 0;
-                let mut stream = response.bytes_stream();
-
-                while let Some(chunk_result) = stream.next().await {
-                    let chunk = chunk_result?;
-                    temp_file.write_all(&chunk).await?;
-                    downloaded += chunk.len() as u64;
+            match client.get(download_url).send().await {
+                Ok(response) => {
+                    // Download was successful, proceed with saving
+                    let total_size = response.content_length().unwrap_or(0);
 
                     if total_size > 0 {
-                        let progress = (downloaded as f64 / total_size as f64) * 100.0;
                         for (_window_label, window) in app.webview_windows() {
-                            let _ = window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress));
+                            let _ = window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0)));
                         }
                     }
-                }
 
-                temp_file.flush().await?;
-                drop(temp_file); // Close the file before processing
-                downloaded_successfully = true;
-                break; // Download successful, exit retry loop
-            }
-            Err(e) => {
-                eprintln!("Download attempt {} failed: {}", attempt, e);
-                last_error = Some(e);
-                if attempt < 3 {
-                    // Wait before retrying (but not after the last attempt)
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Create a temporary file to save the download
+                    let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
+
+                    // Stream the download with progress tracking
+                    let mut downloaded: u64 = 0;
+                    let mut stream = response.bytes_stream();
+
+                    while let Some(chunk_result) = stream.next().await {
+                        let chunk = chunk_result?;
+                        temp_file.write_all(&chunk).await?;
+                        downloaded += chunk.len() as u64;
+
+                        if total_size > 0 {
+                            let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                            for (_window_label, window) in app.webview_windows() {
+                                let _ = window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress));
+                            }
+                        }
+                    }
+
+                    temp_file.flush().await?;
+                    drop(temp_file); // Close the file before processing
+                    downloaded_successfully = true;
+                    break; // Download successful, exit retry loop
+                }
+                Err(e) => {
+                    eprintln!("Download attempt {} failed: {}", attempt, e);
+                    last_error = Some(e);
+                    if attempt < 3 {
+                        // Wait before retrying (but not after the last attempt)
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
                 }
             }
         }
-    }
 
-    // If all attempts failed, return the last error
-    if !downloaded_successfully {
-        if let Some(error) = last_error {
-            return Err(error.into());
+        // If all attempts failed, return the last error
+        if !downloaded_successfully {
+            if let Some(error) = last_error {
+                return Err(error.into());
+            } else {
+                return Err("Download failed for unknown reasons".into());
+            }
+        }
+
+        // Extract the ZIP file
+        let zip_file = std::fs::File::open(&temp_zip_path)?;
+        let mut archive = zip::ZipArchive::new(zip_file)?;
+
+        // Look for the executable in the archive
+        let mut found_executable = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let filename = file.name().to_lowercase();
+
+            // Look for the executable file
+            if filename.ends_with(executable_name) {
+                // Extract this specific file to the target location
+                let mut output_file = File::create(ffmpeg_path)?;
+                std::io::copy(&mut file, &mut output_file)?;
+                output_file.sync_all()?;
+
+                // Make it executable on Unix systems (not needed on Windows)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
+                }
+
+                found_executable = true;
+                break;
+            }
+        }
+
+        // Delete the temporary ZIP file
+        std::fs::remove_file(&temp_zip_path)?;
+
+        if found_executable {
+            Ok(())
         } else {
-            return Err("Download failed for unknown reasons".into());
+            Err(format!("{} not found in the downloaded archive", executable_name).into())
         }
     }
-
-    // Extract the ZIP file
-    let zip_file = std::fs::File::open(&temp_zip_path)?;
-    let mut archive = zip::ZipArchive::new(zip_file)?;
-
-    // Look for the executable in the archive
-    let mut found_executable = false;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let filename = file.name().to_lowercase();
-
-        // Look for the executable file
-        if filename.ends_with(executable_name) {
-            // Extract this specific file to the target location
-            let mut output_file = File::create(ffmpeg_path)?;
-            std::io::copy(&mut file, &mut output_file)?;
-            output_file.sync_all()?;
-
-            // Make it executable on Unix systems (not needed on Windows)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
-            }
-
-            found_executable = true;
-            break;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        // For macOS, we would need a different URL
+        return Err("macOS automatic FFmpeg download not implemented".into());
     }
-
-    // Delete the temporary ZIP file
-    std::fs::remove_file(&temp_zip_path)?;
-
-    if found_executable {
-        Ok(())
-    } else {
-        Err(format!("{} not found in the downloaded archive", executable_name).into())
+    #[cfg(target_os = "linux")]
+    {
+        // For Linux, we would need a different URL
+        return Err("Linux automatic FFmpeg download not implemented".into());
     }
 }
 
