@@ -17,6 +17,11 @@ static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
 // Helper function to get the appropriate data directory based on the operating system
 fn get_data_directory() -> PathBuf {
+    // Check if user has specified a custom directory via environment variable
+    if let Ok(custom_path) = std::env::var("REMOTE_WORK_DATA_DIR") {
+        return PathBuf::from(custom_path);
+    }
+
     if cfg!(target_os = "windows") {
         // Windows: Use XAMPP htdocs
         PathBuf::from("C:\\xampp\\htdocs\\remote-work")
@@ -120,6 +125,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
     let user_id = {
         let user_id_guard = USER_ID.lock().unwrap();
         user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+        // The guard is automatically dropped at the end of this block
     };
 
     // Get file size
@@ -127,16 +133,13 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
         .map(|meta| Some(meta.len() as i64))
         .unwrap_or(None);
 
-    // Create the localhost URL for database storage based on actual storage location
-    let localhost_url = format!("http://localhost/remote-work/{}/{}", file_type, filename);
-
     // Save file info to database based on file type
     match file_type.as_str() {
         "screenshot" => {
             // Create a session ID for the screenshot
             let session_id = uuid::Uuid::new_v4().to_string();
 
-            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &localhost_url, &filename, file_size) {
+            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &file_path.to_string_lossy(), &filename, file_size) {
                 eprintln!("Failed to save screenshot metadata to database: {}", e);
             }
         },
@@ -148,7 +151,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
                 &user_id,
                 &session_id,
                 &filename,
-                Some(&localhost_url),  // Use localhost URL instead of file path
+                Some(&file_path.to_string_lossy()),
                 None, // Duration not known yet
                 file_size
             ) {
@@ -160,8 +163,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
         }
     }
 
-    // Return the localhost URL where the file can be accessed
-    // This matches what we store in the database
+    // Return the URL where the file can be accessed
     let file_url = format!("http://localhost/remote-work/{}/{}", file_type, filename);
     Ok(format!("File saved successfully to: {}, accessible at: {}", file_path.to_string_lossy(), file_url))
 }

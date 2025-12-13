@@ -2,6 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { NetworkUsageComponent } from "./network-usage";
 
+// Define types for Tauri
+declare global {
+  interface Window {
+    __TAURI__: {
+      webviewWindow: {
+        getCurrent: () => any;
+      };
+    };
+  }
+}
+
 // Check if user ID is set, if not show welcome UI
 async function checkUserId() {
   try {
@@ -484,19 +495,20 @@ function initializeMainAppComponents() {
 }
 
 // Function to save a file to XAMPP htdocs directory
-async function saveFileToXamppHtdocs(fileData: Uint8Array, filename: string, fileType: string): Promise<string> {
-  try {
-    const result = await invoke("save_file_to_xampp_htdocs", {
-      fileData: Array.from(fileData),
-      filename: filename,
-      fileType: fileType
-    });
-    return result as string;
-  } catch (error) {
-    console.error(`Error saving ${fileType} to XAMPP htdocs:`, error);
-    throw error;
-  }
-}
+// This function is defined for potential use but currently not called in the main workflow
+// async function saveFileToXamppHtdocs(fileData: Uint8Array, filename: string, fileType: string): Promise<string> {
+//   try {
+//     const result = await invoke("save_file_to_xampp_htdocs", {
+//       fileData: Array.from(fileData),
+//       filename: filename,
+//       fileType: fileType
+//     });
+//     return result as string;
+//   } catch (error) {
+//     console.error(`Error saving ${fileType} to XAMPP htdocs:`, error);
+//     throw error;
+//   }
+// }
 
 // Function to start system-wide idle monitoring in the backend
 async function startSystemIdleMonitoring(): Promise<void> {

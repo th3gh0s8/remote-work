@@ -1,15 +1,14 @@
 use mysql::*;
 use mysql::prelude::*;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 
 // Global flag to track if database is available
 static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
-// Database connection pool
+// Database connection pool - using lazy_static to initialize at runtime
 lazy_static! {
-    pub static ref DB_POOL: Arc<Option<Pool>> = {
+    pub static ref DB_POOL: Option<Pool> = {
         // Try environment variables first, then use config file, then defaults
         let db_config = DatabaseConfig::load();
 
@@ -27,12 +26,12 @@ lazy_static! {
                 // Initialize database tables if they don't exist
                 initialize_database(&pool);
                 DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
-                Arc::new(Some(pool))
+                Some(pool)
             },
             Err(e) => {
                 eprintln!("Failed to create MySQL pool: {}", e);
                 DATABASE_AVAILABLE.store(false, Ordering::SeqCst);
-                Arc::new(None)
+                None
             }
         }
     };
@@ -51,19 +50,22 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    conn.exec_drop(
-        "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
-        (
-            user_id,
-            username.unwrap_or(""),
-            email.unwrap_or(""),
-            username.unwrap_or(""),
-            email.unwrap_or("")
-        )
-    )?;
+        conn.exec_drop(
+            "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
+            (
+                user_id,
+                username.unwrap_or(""),
+                email.unwrap_or(""),
+                username.unwrap_or(""),
+                email.unwrap_or("")
+            )
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -76,7 +78,7 @@ pub fn get_user(user_id: &str) -> Result<Option<UserInfo>, Box<dyn std::error::E
         return Ok(None);
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let pool = DB_POOL.as_ref().ok_or("Database pool not available")?;
     let mut conn = pool.get_conn()?;
 
     let result: Option<UserInfo> = conn
@@ -107,7 +109,7 @@ pub fn user_exists(user_id: &str) -> Result<bool, Box<dyn std::error::Error + Se
         return Ok(false);
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let pool = DB_POOL.as_ref().ok_or("Database pool not available")?;
     let mut conn = pool.get_conn()?;
 
     let result: Option<u32> = conn.exec_first(
@@ -126,7 +128,7 @@ pub fn get_all_users(limit: Option<u32>) -> Result<Vec<UserInfo>, Box<dyn std::e
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let pool = DB_POOL.as_ref().ok_or("Database pool not available")?;
     let mut conn = pool.get_conn()?;
 
     if let Some(lim) = limit {
@@ -357,22 +359,24 @@ pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, f
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
+        // Ensure user exists in the users table
+        create_user(user_id, None, None)?;
 
-    // Ensure user exists in the users table
-    create_user(user_id, None, None)?;
-
-    conn.exec_drop(
-        "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
-        (
-            user_id,
-            session_id,
-            file_path,
-            filename,
-            file_size.unwrap_or(0)
-        )
-    )?;
+        conn.exec_drop(
+            "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
+            (
+                user_id,
+                session_id,
+                file_path,
+                filename,
+                file_size.unwrap_or(0)
+            )
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -392,7 +396,7 @@ pub fn save_recording_to_db(
         return Ok(0);
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let pool = DB_POOL.as_ref().unwrap();
     let mut conn = pool.get_conn()?;
 
     // Ensure user exists in the users table
@@ -423,7 +427,7 @@ pub fn get_recording_id_by_session(session_id: &str) -> Result<Option<u64>, Box<
         return Ok(None);
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let pool = DB_POOL.as_ref().unwrap();
     let mut conn = pool.get_conn()?;
 
     let result: Option<u64> = conn.exec_first(
@@ -450,24 +454,27 @@ pub fn save_recording_segment_to_db(
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    // Ensure user exists in the users table
-    create_user(user_id, None, None)?;
+        // Ensure user exists in the users table
+        create_user(user_id, None, None)?;
 
-    conn.exec_drop(
-        "INSERT INTO recording_segments (user_id, recording_id, segment_number, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            user_id,
-            recording_id,
-            segment_number,
-            filename,
-            file_path.unwrap_or(""),
-            duration_seconds.unwrap_or(0),
-            file_size.unwrap_or(0)
-        )
-    )?;
+        conn.exec_drop(
+            "INSERT INTO recording_segments (user_id, recording_id, segment_number, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                recording_id,
+                segment_number,
+                filename,
+                file_path.unwrap_or(""),
+                duration_seconds.unwrap_or(0),
+                file_size.unwrap_or(0)
+            )
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -486,62 +493,66 @@ pub fn update_recording_metadata_in_db(
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    let query = if final_file_path.is_some() && final_filename.is_some() {
-        "UPDATE recordings SET filename = ?, file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
-    } else if final_file_path.is_some() {
-        "UPDATE recordings SET file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
-    } else if final_filename.is_some() {
-        "UPDATE recordings SET filename = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
+        let query = if final_file_path.is_some() && final_filename.is_some() {
+            "UPDATE recordings SET filename = ?, file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
+        } else if final_file_path.is_some() {
+            "UPDATE recordings SET file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
+        } else if final_filename.is_some() {
+            "UPDATE recordings SET filename = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
+        } else {
+            "UPDATE recordings SET duration_seconds = ?, file_size = ? WHERE session_id = ?"
+        };
+
+        let result = if final_file_path.is_some() && final_filename.is_some() {
+            conn.exec_drop(
+                query,
+                (
+                    final_filename.unwrap(),
+                    final_file_path.unwrap(),
+                    duration_seconds.unwrap_or(0),
+                    file_size.unwrap_or(0),
+                    session_id
+                )
+            )
+        } else if final_file_path.is_some() {
+            conn.exec_drop(
+                query,
+                (
+                    final_file_path.unwrap(),
+                    duration_seconds.unwrap_or(0),
+                    file_size.unwrap_or(0),
+                    session_id
+                )
+            )
+        } else if final_filename.is_some() {
+            conn.exec_drop(
+                query,
+                (
+                    final_filename.unwrap(),
+                    duration_seconds.unwrap_or(0),
+                    file_size.unwrap_or(0),
+                    session_id
+                )
+            )
+        } else {
+            conn.exec_drop(
+                query,
+                (
+                    duration_seconds.unwrap_or(0),
+                    file_size.unwrap_or(0),
+                    session_id
+                )
+            )
+        };
+
+        result?;
     } else {
-        "UPDATE recordings SET duration_seconds = ?, file_size = ? WHERE session_id = ?"
-    };
+        eprintln!("Database pool is not available");
+    }
 
-    let result = if final_file_path.is_some() && final_filename.is_some() {
-        conn.exec_drop(
-            query,
-            (
-                final_filename.unwrap(),
-                final_file_path.unwrap(),
-                duration_seconds.unwrap_or(0),
-                file_size.unwrap_or(0),
-                session_id
-            )
-        )
-    } else if final_file_path.is_some() {
-        conn.exec_drop(
-            query,
-            (
-                final_file_path.unwrap(),
-                duration_seconds.unwrap_or(0),
-                file_size.unwrap_or(0),
-                session_id
-            )
-        )
-    } else if final_filename.is_some() {
-        conn.exec_drop(
-            query,
-            (
-                final_filename.unwrap(),
-                duration_seconds.unwrap_or(0),
-                file_size.unwrap_or(0),
-                session_id
-            )
-        )
-    } else {
-        conn.exec_drop(
-            query,
-            (
-                duration_seconds.unwrap_or(0),
-                file_size.unwrap_or(0),
-                session_id
-            )
-        )
-    };
-
-    result?;
     Ok(())
 }
 
@@ -553,16 +564,19 @@ pub fn save_user_activity_to_db(user_id: &str, activity_type: &str, duration_sec
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    // Ensure user exists in the users table
-    create_user(user_id, None, None)?;
+        // Ensure user exists in the users table
+        create_user(user_id, None, None)?;
 
-    conn.exec_drop(
-        "INSERT INTO user_activity (user_id, activity_type, duration_seconds) VALUES (?, ?, ?)",
-        (user_id, activity_type, duration_seconds.unwrap_or(0))
-    )?;
+        conn.exec_drop(
+            "INSERT INTO user_activity (user_id, activity_type, duration_seconds) VALUES (?, ?, ?)",
+            (user_id, activity_type, duration_seconds.unwrap_or(0))
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -581,16 +595,19 @@ pub fn save_network_usage_to_db(
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    // Ensure user exists in the users table
-    create_user(user_id, None, None)?;
+        // Ensure user exists in the users table
+        create_user(user_id, None, None)?;
 
-    conn.exec_drop(
-        "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
-        (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
-    )?;
+        conn.exec_drop(
+            "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
+            (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -603,13 +620,16 @@ pub fn add_excluded_window_to_db(window_title: &str) -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    conn.exec_drop(
-        "INSERT IGNORE INTO excluded_windows (window_title) VALUES (?)",
-        (window_title,)
-    )?;
+        conn.exec_drop(
+            "INSERT IGNORE INTO excluded_windows (window_title) VALUES (?)",
+            (window_title,)
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -622,13 +642,16 @@ pub fn remove_excluded_window_from_db(window_title: &str) -> Result<(), Box<dyn 
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    conn.exec_drop(
-        "DELETE FROM excluded_windows WHERE window_title = ?",
-        (window_title,)
-    )?;
+        conn.exec_drop(
+            "DELETE FROM excluded_windows WHERE window_title = ?",
+            (window_title,)
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -641,15 +664,19 @@ pub fn get_excluded_windows_from_db() -> Result<Vec<String>, Box<dyn std::error:
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    let result: Vec<String> = conn
-        .query_map("SELECT window_title FROM excluded_windows", |window_title| {
-            window_title
-        })?;
+        let result: Vec<String> = conn
+            .query_map("SELECT window_title FROM excluded_windows", |window_title| {
+                window_title
+            })?;
 
-    Ok(result)
+        Ok(result)
+    } else {
+        eprintln!("Database pool is not available");
+        Ok(Vec::new())
+    }
 }
 
 // Function to update process status in database
@@ -664,13 +691,16 @@ pub fn update_process_status_in_db(
         return Ok(());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    conn.exec_drop(
-        "UPDATE process_status SET recording_active = ?, screenshotting_active = ?, idle_detection_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-        (recording_active, screenshotting_active, idle_detection_active)
-    )?;
+        conn.exec_drop(
+            "UPDATE process_status SET recording_active = ?, screenshotting_active = ?, idle_detection_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+            (recording_active, screenshotting_active, idle_detection_active)
+        )?;
+    } else {
+        eprintln!("Database pool is not available");
+    }
 
     Ok(())
 }
@@ -683,26 +713,30 @@ pub fn get_screenshots_by_session(user_id: &str, session_id: &str) -> Result<Vec
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    let result: Vec<ScreenshotData> = conn
-        .exec_map(
-            "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? AND session_id = ? ORDER BY created_at DESC",
-            (user_id, session_id),
-            |(id, session_id_db, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
-                ScreenshotData {
-                    id,
-                    session_id: session_id_db,
-                    file_path,
-                    filename,
-                    file_size,
-                    created_at,
+        let result: Vec<ScreenshotData> = conn
+            .exec_map(
+                "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? AND session_id = ? ORDER BY created_at DESC",
+                (user_id, session_id),
+                |(id, session_id_db, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
+                    ScreenshotData {
+                        id,
+                        session_id: session_id_db,
+                        file_path,
+                        filename,
+                        file_size,
+                        created_at,
+                    }
                 }
-            }
-        )?;
+            )?;
 
-    Ok(result)
+        Ok(result)
+    } else {
+        eprintln!("Database pool is not available");
+        Ok(Vec::new())
+    }
 }
 
 // Function to get all screenshots from database for a specific user
@@ -713,39 +747,45 @@ pub fn get_all_screenshots(user_id: &str, limit: Option<u32>) -> Result<Vec<Scre
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    if let Some(lim) = limit {
-        Ok(conn.exec_map(
-            "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-            (user_id, lim),
-            |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
-                ScreenshotData {
-                    id,
-                    session_id,
-                    file_path,
-                    filename,
-                    file_size,
-                    created_at,
+        if let Some(lim) = limit {
+            let result = conn.exec_map(
+                "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, lim),
+                |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
+                    ScreenshotData {
+                        id,
+                        session_id,
+                        file_path,
+                        filename,
+                        file_size,
+                        created_at,
+                    }
                 }
-            }
-        )?)
+            )?;
+            Ok(result)
+        } else {
+            let result = conn.exec_map(
+                "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+                |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
+                    ScreenshotData {
+                        id,
+                        session_id,
+                        file_path,
+                        filename,
+                        file_size,
+                        created_at,
+                    }
+                }
+            )?;
+            Ok(result)
+        }
     } else {
-        Ok(conn.exec_map(
-            "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-            |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
-                ScreenshotData {
-                    id,
-                    session_id,
-                    file_path,
-                    filename,
-                    file_size,
-                    created_at,
-                }
-            }
-        )?)
+        eprintln!("Database pool is not available");
+        Ok(Vec::new())
     }
 }
 
@@ -757,41 +797,47 @@ pub fn get_recordings(user_id: &str, limit: Option<u32>) -> Result<Vec<Recording
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    if let Some(lim) = limit {
-        Ok(conn.exec_map(
-            "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-            (user_id, lim),
-            |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
-                RecordingData {
-                    id,
-                    session_id,
-                    filename,
-                    file_path,
-                    duration_seconds,
-                    file_size,
-                    created_at,
+        if let Some(lim) = limit {
+            let result = conn.exec_map(
+                "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, lim),
+                |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
+                    RecordingData {
+                        id,
+                        session_id,
+                        filename,
+                        file_path,
+                        duration_seconds,
+                        file_size,
+                        created_at,
+                    }
                 }
-            }
-        )?)
+            )?;
+            Ok(result)
+        } else {
+            let result = conn.exec_map(
+                "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,),
+                |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
+                    RecordingData {
+                        id,
+                        session_id,
+                        filename,
+                        file_path,
+                        duration_seconds,
+                        file_size,
+                        created_at,
+                    }
+                }
+            )?;
+            Ok(result)
+        }
     } else {
-        Ok(conn.exec_map(
-            "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-            |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
-                RecordingData {
-                    id,
-                    session_id,
-                    filename,
-                    file_path,
-                    duration_seconds,
-                    file_size,
-                    created_at,
-                }
-            }
-        )?)
+        eprintln!("Database pool is not available");
+        Ok(Vec::new())
     }
 }
 
@@ -803,35 +849,41 @@ pub fn get_user_activity(user_id: &str, limit: Option<u32>) -> Result<Vec<UserAc
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    if let Some(lim) = limit {
-        Ok(conn.exec_map(
-            "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (user_id, lim),
-            |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
-                UserActivityData {
-                    id,
-                    activity_type,
-                    duration_seconds,
-                    timestamp,
+        if let Some(lim) = limit {
+            let result = conn.exec_map(
+                "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (user_id, lim),
+                |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
+                    UserActivityData {
+                        id,
+                        activity_type,
+                        duration_seconds,
+                        timestamp,
+                    }
                 }
-            }
-        )?)
+            )?;
+            Ok(result)
+        } else {
+            let result = conn.exec_map(
+                "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC",
+                (user_id,),
+                |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
+                    UserActivityData {
+                        id,
+                        activity_type,
+                        duration_seconds,
+                        timestamp,
+                    }
+                }
+            )?;
+            Ok(result)
+        }
     } else {
-        Ok(conn.exec_map(
-            "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC",
-            (user_id,),
-            |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
-                UserActivityData {
-                    id,
-                    activity_type,
-                    duration_seconds,
-                    timestamp,
-                }
-            }
-        )?)
+        eprintln!("Database pool is not available");
+        Ok(Vec::new())
     }
 }
 
@@ -843,39 +895,45 @@ pub fn get_network_usage(user_id: &str, limit: Option<u32>) -> Result<Vec<Networ
         return Ok(Vec::new());
     }
 
-    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
-    let mut conn = pool.get_conn()?;
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
 
-    if let Some(lim) = limit {
-        Ok(conn.exec_map(
-            "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage WHERE user_id = ? ORDER BY recorded_at DESC LIMIT ?",
-            (user_id, lim),
-            |(id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at): (u32, String, String, String, String, String)| {
-                NetworkUsageData {
-                    id,
-                    download_speed,
-                    upload_speed,
-                    total_downloaded,
-                    total_uploaded,
-                    recorded_at,
+        if let Some(lim) = limit {
+            let result = conn.exec_map(
+                "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage WHERE user_id = ? ORDER BY recorded_at DESC LIMIT ?",
+                (user_id, lim),
+                |(id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at): (u32, String, String, String, String, String)| {
+                    NetworkUsageData {
+                        id,
+                        download_speed,
+                        upload_speed,
+                        total_downloaded,
+                        total_uploaded,
+                        recorded_at,
+                    }
                 }
-            }
-        )?)
+            )?;
+            Ok(result)
+        } else {
+            let result = conn.exec_map(
+                "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage WHERE user_id = ? ORDER BY recorded_at DESC",
+                (user_id,),
+                |(id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at): (u32, String, String, String, String, String)| {
+                    NetworkUsageData {
+                        id,
+                        download_speed,
+                        upload_speed,
+                        total_downloaded,
+                        total_uploaded,
+                        recorded_at,
+                    }
+                }
+            )?;
+            Ok(result)
+        }
     } else {
-        Ok(conn.exec_map(
-            "SELECT id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at FROM network_usage WHERE user_id = ? ORDER BY recorded_at DESC",
-            (user_id,),
-            |(id, download_speed, upload_speed, total_downloaded, total_uploaded, recorded_at): (u32, String, String, String, String, String)| {
-                NetworkUsageData {
-                    id,
-                    download_speed,
-                    upload_speed,
-                    total_downloaded,
-                    total_uploaded,
-                    recorded_at,
-                }
-            }
-        )?)
+        eprintln!("Database pool is not available");
+        Ok(Vec::new())
     }
 }
 

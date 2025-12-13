@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 screenshots = "0.8.0"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.11", features = ["stream"] }
+reqwest = { version = "0.11", features = ["stream", "multipart"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 zip = "0.6"
