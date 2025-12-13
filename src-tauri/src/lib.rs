@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 use std::fs;
+use std::path::PathBuf;
 use lazy_static::lazy_static;
 use screenshots::Screen;
 use tauri::{Emitter, Manager};
@@ -10,6 +11,37 @@ use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
 use sysinfo::{Networks};
 mod database;
+
+// Global flag to track if database is available
+static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+// Helper function to get the appropriate data directory based on the operating system
+fn get_data_directory() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        // Windows: Use XAMPP htdocs
+        PathBuf::from("C:\\xampp\\htdocs\\remote-work")
+    } else {
+        // Linux/macOS: Use XAMPP htdocs (check common installation locations)
+        // Standard XAMPP location on Linux
+        let xampp_paths = [
+            "/opt/lampp/htdocs/remote-work",  // Standard XAMPP location
+            "/Applications/XAMPP/htdocs/remote-work",  // macOS XAMPP location
+            "/usr/local/xampp/htdocs/remote-work",  // Alternative location
+        ];
+
+        for path_str in &xampp_paths {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        // Fallback to home directory if no XAMPP found
+        let mut path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+        path.push("remote-work-data");
+        path
+    }
+}
 
 
 
@@ -68,14 +100,14 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
     use std::fs;
     use std::path::Path;
 
-    // Define XAMPP htdocs path (adjust this path if needed for your system)
-    let xampp_htdocs_path = Path::new("C:\\xampp\\htdocs\\remote-work");
+    // Define data directory path based on the operating system
+    let data_dir_path = get_data_directory();
 
-    // Create the remote-work directory in htdocs if it doesn't exist
-    fs::create_dir_all(xampp_htdocs_path).map_err(|e| format!("Failed to create directory: {}", e))?;
+    // Create the remote-work directory if it doesn't exist
+    fs::create_dir_all(&data_dir_path).map_err(|e| format!("Failed to create directory: {}", e))?;
 
     // Create the subdirectory based on file type
-    let file_type_dir = xampp_htdocs_path.join(&file_type);
+    let file_type_dir = data_dir_path.join(&file_type);
     fs::create_dir_all(&file_type_dir).map_err(|e| format!("Failed to create {} directory: {}", file_type, e))?;
 
     // Create the final file path
@@ -83,9 +115,6 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
 
     // Write the file data to the specified path
     fs::write(&file_path, file_data).map_err(|e| format!("Failed to write file: {}", e))?;
-
-    // Get the file path as a string for database storage
-    let file_path_str = file_path.to_string_lossy().to_string();
 
     // Get user ID before saving to database
     let user_id = {
@@ -98,13 +127,16 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
         .map(|meta| Some(meta.len() as i64))
         .unwrap_or(None);
 
+    // Create the localhost URL for database storage based on actual storage location
+    let localhost_url = format!("http://localhost/remote-work/{}/{}", file_type, filename);
+
     // Save file info to database based on file type
     match file_type.as_str() {
         "screenshot" => {
             // Create a session ID for the screenshot
             let session_id = uuid::Uuid::new_v4().to_string();
 
-            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &file_path_str, &filename, file_size) {
+            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &localhost_url, &filename, file_size) {
                 eprintln!("Failed to save screenshot metadata to database: {}", e);
             }
         },
@@ -116,7 +148,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
                 &user_id,
                 &session_id,
                 &filename,
-                Some(&file_path_str),
+                Some(&localhost_url),  // Use localhost URL instead of file path
                 None, // Duration not known yet
                 file_size
             ) {
@@ -128,9 +160,10 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
         }
     }
 
-    // Return the URL where the file can be accessed
+    // Return the localhost URL where the file can be accessed
+    // This matches what we store in the database
     let file_url = format!("http://localhost/remote-work/{}/{}", file_type, filename);
-    Ok(format!("File saved successfully to: {}, accessible at: {}", file_path_str, file_url))
+    Ok(format!("File saved successfully to: {}, accessible at: {}", file_path.to_string_lossy(), file_url))
 }
 
 #[tauri::command]
@@ -161,9 +194,9 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
     // Create a unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Create screenshots directory in XAMPP htdocs
-    let xampp_htdocs_path = std::path::Path::new("C:\\xampp\\htdocs\\remote-work");
-    let dir = xampp_htdocs_path.join("screenshots");
+    // Create screenshots directory in data directory
+    let data_dir_path = get_data_directory();
+    let dir = data_dir_path.join("screenshots");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     // Store task state as active
@@ -198,7 +231,7 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -267,11 +300,10 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                 let timestamp = start_time.elapsed().as_millis();
                                 let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
 
-                                // Create path to screenshots directory in XAMPP htdocs
-                                let xampp_htdocs_path = std::path::Path::new("C:\\xampp\\htdocs\\remote-work");
-                                let mut screenshots_dir = xampp_htdocs_path.join("screenshots");
+                                // Create path to screenshots directory in data directory
+                                let mut screenshots_dir = get_data_directory().join("screenshots");
                                 if let Err(e) = std::fs::create_dir_all(&screenshots_dir) {
-                                    eprintln!("Failed to create screenshots directory in XAMPP htdocs: {}", e);
+                                    eprintln!("Failed to create screenshots directory in data directory: {}", e);
                                     // Try to create in temp directory as fallback
                                     screenshots_dir = std::env::temp_dir();
                                     screenshots_dir.push("remote-work-screenshots");
@@ -410,9 +442,9 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
         drop(process_guard);
     }
 
-    // Create recordings directory in XAMPP htdocs
-    let xampp_htdocs_path = std::path::Path::new("C:\\xampp\\htdocs\\remote-work");
-    let dir = xampp_htdocs_path.join("recordings");
+    // Create recordings directory in data directory
+    let data_dir_path = get_data_directory();
+    let dir = data_dir_path.join("recordings");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     // Create unique session ID
@@ -504,12 +536,30 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                 .spawn()
                 .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
+            // On Linux, use x11grab for screen capture
             Command::new(&ffmpeg_cmd)
                 .args(&[
-                    "-f", "gdigrab",
-                    "-i", "desktop",
+                    "-f", "x11grab",
+                    "-i", &std::env::var("DISPLAY").unwrap_or_else(|_| ":0.0".to_string()),
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, use avfoundation for screen capture
+            Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "avfoundation",
+                    "-i", "default",
                     "-vcodec", "libx264",
                     "-crf", "28",
                     "-preset", "ultrafast",
@@ -608,7 +658,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -677,11 +727,10 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                 let timestamp = start_time.elapsed().as_millis();
                                 let filename = format!("snapshot_{}_{}.png", screenshot_session_id, timestamp);
 
-                                // Create path to screenshots directory in XAMPP htdocs
-                                let xampp_htdocs_path = std::path::Path::new("C:\\xampp\\htdocs\\remote-work");
-                                let mut screenshots_dir = xampp_htdocs_path.join("screenshots");
+                                // Create path to screenshots directory in data directory
+                                let mut screenshots_dir = get_data_directory().join("screenshots");
                                 if let Err(e) = std::fs::create_dir_all(&screenshots_dir) {
-                                    eprintln!("Failed to create screenshots directory in XAMPP htdocs: {}", e);
+                                    eprintln!("Failed to create screenshots directory in data directory: {}", e);
                                     // Try to create in temp directory as fallback
                                     screenshots_dir = std::env::temp_dir();
                                     screenshots_dir.push("remote-work-screenshots");
@@ -1082,11 +1131,86 @@ fn get_system_idle_status() -> Result<String, String> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
-        // For non-Windows systems, we can use platform-specific APIs or return an error
-        // For now, we'll return an error for non-Windows systems
-        Err("System idle detection is only implemented for Windows".to_string())
+        // Using x11rb to get idle time on Linux
+        use std::env;
+        use std::process::Command;
+
+        // Try using the X11 idle time if available
+        if let Ok(display) = env::var("DISPLAY") {
+            if !display.is_empty() {
+                // Use xprintidle to get the idle time in milliseconds
+                match Command::new("xprintidle").output() {
+                    Ok(output) => {
+                        if let Ok(idle_str) = String::from_utf8(output.stdout) {
+                            if let Ok(idle_ms) = idle_str.trim().parse::<u64>() {
+                                let idle_seconds = idle_ms / 1000;
+
+                                let status = if idle_seconds >= 300 {  // 5 minutes
+                                    "idle"
+                                } else if idle_seconds >= 30 {  // 30 seconds
+                                    "idle"
+                                } else {
+                                    "active"
+                                };
+
+                                return Ok(format!(r#"{{"status": "{}", "idleTimeSeconds": {}}}"#, status, idle_seconds));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // xprintidle command not available, fall back to other methods
+                        // For now, return active status
+                        return Ok(r#"{"status": "active", "idleTimeSeconds": 0}"#.to_string());
+                    }
+                }
+            }
+        }
+
+        // If running without X11 or xprintidle failed, return active
+        Ok(r#"{"status": "active", "idleTimeSeconds": 0}"#.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // Use 'ioreg' to get system idle time on macOS
+        match Command::new("ioreg")
+            .args(&["-c", "IOHIDSystem"])
+            .args(&["-r", "-k", "HIDIdleTime"])
+            .output() {
+            Ok(output) => {
+                if let Ok(ioreg_output) = String::from_utf8(output.stdout) {
+                    // Parse the idle time from ioreg output (in nanoseconds)
+                    if let Some(line) = ioreg_output.lines().find(|line| line.contains("HIDIdleTime")) {
+                        if let Some(nanoseconds_str) = line.split('=').nth(1) {
+                            if let Ok(nanoseconds) = nanoseconds_str.trim().parse::<u64>() {
+                                // Convert nanoseconds to seconds
+                                let idle_seconds = (nanoseconds / 1_000_000_000) as u64;
+
+                                let status = if idle_seconds >= 300 {  // 5 minutes
+                                    "idle"
+                                } else if idle_seconds >= 30 {  // 30 seconds
+                                    "idle"
+                                } else {
+                                    "active"
+                                };
+
+                                return Ok(format!(r#"{{"status": "{}", "idleTimeSeconds": {}}}"#, status, idle_seconds));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // ioreg command not available or failed
+            }
+        }
+
+        // Fallback for macOS if ioreg is not available
+        Ok(r#"{"status": "active", "idleTimeSeconds": 0}"#.to_string())
     }
 }
 
@@ -1927,12 +2051,30 @@ async fn start_new_recording_segment() -> Result<String, String> {
                 .spawn()
                 .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
+            // On Linux, use x11grab for screen capture
             std::process::Command::new(&ffmpeg_cmd)
                 .args(&[
-                    "-f", "gdigrab",
-                    "-i", "desktop",
+                    "-f", "x11grab",
+                    "-i", &std::env::var("DISPLAY").unwrap_or_else(|_| ":0.0".to_string()),
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, use avfoundation for screen capture
+            std::process::Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "avfoundation",
+                    "-i", "default",
                     "-vcodec", "libx264",
                     "-crf", "28",
                     "-preset", "ultrafast",
@@ -2101,6 +2243,10 @@ pub fn is_user_id_set_sync() -> bool {
 
 #[tauri::command]
 async fn create_user(user_id: String, username: Option<String>, email: Option<String>) -> Result<String, String> {
+    if !database::is_database_available() {
+        return Err("Database is not available. Data will be stored when database is back online.".to_string());
+    }
+
     match database::create_user(&user_id, username.as_deref(), email.as_deref()) {
         Ok(()) => Ok(format!("User {} created/updated successfully", user_id)),
         Err(e) => Err(format!("Failed to create/update user: {}", e)),
@@ -2109,6 +2255,10 @@ async fn create_user(user_id: String, username: Option<String>, email: Option<St
 
 #[tauri::command]
 async fn get_user(user_id: String) -> Result<String, String> {
+    if !database::is_database_available() {
+        return Err("Database is not available. Cannot retrieve data.".to_string());
+    }
+
     match database::get_user(&user_id) {
         Ok(Some(user_info)) => {
             match serde_json::to_string(&user_info) {
@@ -2123,6 +2273,10 @@ async fn get_user(user_id: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn get_all_users(limit: Option<u32>) -> Result<String, String> {
+    if !database::is_database_available() {
+        return Err("Database is not available. Cannot retrieve data.".to_string());
+    }
+
     match database::get_all_users(limit) {
         Ok(users) => {
             match serde_json::to_string(&users) {
@@ -2136,6 +2290,11 @@ async fn get_all_users(limit: Option<u32>) -> Result<String, String> {
 
 #[tauri::command]
 async fn user_exists(user_id: String) -> Result<bool, String> {
+    if !database::is_database_available() {
+        // If database is not available, assume user doesn't exist
+        return Ok(false);
+    }
+
     match database::user_exists(&user_id) {
         Ok(exists) => Ok(exists),
         Err(e) => Err(format!("Failed to check if user exists: {}", e)),

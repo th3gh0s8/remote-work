@@ -1,11 +1,15 @@
 use mysql::*;
 use mysql::prelude::*;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
+
+// Global flag to track if database is available
+static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
 // Database connection pool
 lazy_static! {
-    pub static ref DB_POOL: Arc<Pool> = {
+    pub static ref DB_POOL: Arc<Option<Pool>> = {
         // Try environment variables first, then use config file, then defaults
         let db_config = DatabaseConfig::load();
 
@@ -18,19 +22,37 @@ lazy_static! {
             db_config.database
         );
 
-        let opts = Opts::from_url(&url).expect("Invalid MySQL URL");
-        let pool = Pool::new(opts).expect("Failed to create MySQL pool");
-
-        // Initialize database tables if they don't exist
-        initialize_database(&pool);
-
-        Arc::new(pool)
+        match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+            Ok(pool) => {
+                // Initialize database tables if they don't exist
+                initialize_database(&pool);
+                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+                Arc::new(Some(pool))
+            },
+            Err(e) => {
+                eprintln!("Failed to create MySQL pool: {}", e);
+                DATABASE_AVAILABLE.store(false, Ordering::SeqCst);
+                Arc::new(None)
+            }
+        }
     };
+}
+
+// Helper function to check if database is available
+pub fn is_database_available() -> bool {
+    DATABASE_AVAILABLE.load(Ordering::SeqCst)
 }
 
 // Function to create a new user in the database
 pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // Log that database is not available but don't fail the operation
+        eprintln!("Database not available, skipping user creation");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     conn.exec_drop(
         "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
@@ -48,7 +70,14 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
 
 // Function to get user by user_id
 pub fn get_user(user_id: &str) -> Result<Option<UserInfo>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return None
+        eprintln!("Database not available, returning None for user query");
+        return Ok(None);
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     let result: Option<UserInfo> = conn
         .exec_first(
@@ -72,7 +101,14 @@ pub fn get_user(user_id: &str) -> Result<Option<UserInfo>, Box<dyn std::error::E
 
 // Function to check if a user exists
 pub fn user_exists(user_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, assume user doesn't exist
+        eprintln!("Database not available, assuming user doesn't exist");
+        return Ok(false);
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     let result: Option<u32> = conn.exec_first(
         "SELECT id FROM users WHERE user_id = ?",
@@ -84,7 +120,14 @@ pub fn user_exists(user_id: &str) -> Result<bool, Box<dyn std::error::Error + Se
 
 // Function to get all users
 pub fn get_all_users(limit: Option<u32>) -> Result<Vec<UserInfo>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty user list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     if let Some(lim) = limit {
         Ok(conn.exec_map(
@@ -164,7 +207,7 @@ fn initialize_database(pool: &Pool) {
     let mut conn = pool.get_conn().expect("Failed to get database connection");
 
     // Create users table first (since other tables reference it)
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS users (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id VARCHAR(255) NOT NULL UNIQUE,
@@ -175,10 +218,12 @@ fn initialize_database(pool: &Pool) {
             is_active BOOLEAN DEFAULT TRUE,
             INDEX idx_user_id (user_id)
         )"
-    ).expect("Failed to create users table");
+    ) {
+        eprintln!("Failed to create users table: {}", e);
+    }
 
     // Create screenshots table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS screenshots (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id VARCHAR(255) NOT NULL,
@@ -192,10 +237,12 @@ fn initialize_database(pool: &Pool) {
             INDEX idx_session_id (session_id),
             INDEX idx_created_at (created_at)
         )"
-    ).expect("Failed to create screenshots table");
+    ) {
+        eprintln!("Failed to create screenshots table: {}", e);
+    }
 
     // Create recordings table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS recordings (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id VARCHAR(255) NOT NULL,
@@ -210,10 +257,12 @@ fn initialize_database(pool: &Pool) {
             INDEX idx_session_id (session_id),
             INDEX idx_created_at (created_at)
         )"
-    ).expect("Failed to create recordings table");
+    ) {
+        eprintln!("Failed to create recordings table: {}", e);
+    }
 
     // Create recording segments table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS recording_segments (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id VARCHAR(255) NOT NULL,
@@ -229,10 +278,12 @@ fn initialize_database(pool: &Pool) {
             INDEX idx_user_id (user_id),
             INDEX idx_recording_id (recording_id)
         )"
-    ).expect("Failed to create recording_segments table");
+    ) {
+        eprintln!("Failed to create recording_segments table: {}", e);
+    }
 
     // Create user_activity table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS user_activity (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id VARCHAR(255) NOT NULL,
@@ -243,10 +294,12 @@ fn initialize_database(pool: &Pool) {
             INDEX idx_user_id (user_id),
             INDEX idx_timestamp (timestamp)
         )"
-    ).expect("Failed to create user_activity table");
+    ) {
+        eprintln!("Failed to create user_activity table: {}", e);
+    }
 
     // Create network_usage table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS network_usage (
             id INT AUTO_INCREMENT PRIMARY KEY,
             user_id VARCHAR(255) NOT NULL,
@@ -259,19 +312,23 @@ fn initialize_database(pool: &Pool) {
             INDEX idx_user_id (user_id),
             INDEX idx_recorded_at (recorded_at)
         )"
-    ).expect("Failed to create network_usage table");
-    
+    ) {
+        eprintln!("Failed to create network_usage table: {}", e);
+    }
+
     // Create excluded_windows table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS excluded_windows (
             id INT AUTO_INCREMENT PRIMARY KEY,
             window_title VARCHAR(255) NOT NULL UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"
-    ).expect("Failed to create excluded_windows table");
-    
+    ) {
+        eprintln!("Failed to create excluded_windows table: {}", e);
+    }
+
     // Create process_status table
-    conn.query_drop(
+    if let Err(e) = conn.query_drop(
         "CREATE TABLE IF NOT EXISTS process_status (
             id INT AUTO_INCREMENT PRIMARY KEY,
             recording_active BOOLEAN DEFAULT FALSE,
@@ -279,18 +336,29 @@ fn initialize_database(pool: &Pool) {
             idle_detection_active BOOLEAN DEFAULT FALSE,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         )"
-    ).expect("Failed to create process_status table");
-    
+    ) {
+        eprintln!("Failed to create process_status table: {}", e);
+    }
+
     // Insert initial process status if not exists
-    conn.query_drop(
-        "INSERT IGNORE INTO process_status (recording_active, screenshotting_active, idle_detection_active) 
+    if let Err(e) = conn.query_drop(
+        "INSERT IGNORE INTO process_status (recording_active, screenshotting_active, idle_detection_active)
          VALUES (FALSE, FALSE, FALSE)"
-    ).expect("Failed to insert initial process status");
+    ) {
+        eprintln!("Failed to insert initial process status: {}", e);
+    }
 }
 
 // Function to save screenshot metadata to database
 pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, filename: &str, file_size: Option<i64>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping screenshot metadata save");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     // Ensure user exists in the users table
     create_user(user_id, None, None)?;
@@ -318,7 +386,14 @@ pub fn save_recording_to_db(
     duration_seconds: Option<i32>,
     file_size: Option<i64>
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return a placeholder ID
+        eprintln!("Database not available, skipping recording metadata save");
+        return Ok(0);
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     // Ensure user exists in the users table
     create_user(user_id, None, None)?;
@@ -342,7 +417,14 @@ pub fn save_recording_to_db(
 
 // Function to get recording ID by session ID
 pub fn get_recording_id_by_session(session_id: &str) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return None
+        eprintln!("Database not available, returning None for recording ID query");
+        return Ok(None);
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     let result: Option<u64> = conn.exec_first(
         "SELECT id FROM recordings WHERE session_id = ? ORDER BY id DESC LIMIT 1",
@@ -362,7 +444,14 @@ pub fn save_recording_segment_to_db(
     duration_seconds: Option<i32>,
     file_size: Option<i64>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping recording segment save");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     // Ensure user exists in the users table
     create_user(user_id, None, None)?;
@@ -391,7 +480,14 @@ pub fn update_recording_metadata_in_db(
     duration_seconds: Option<i32>,
     file_size: Option<i64>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping recording metadata update");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     let query = if final_file_path.is_some() && final_filename.is_some() {
         "UPDATE recordings SET filename = ?, file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
@@ -451,7 +547,14 @@ pub fn update_recording_metadata_in_db(
 
 // Function to save user activity to database
 pub fn save_user_activity_to_db(user_id: &str, activity_type: &str, duration_seconds: Option<i32>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping user activity save");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     // Ensure user exists in the users table
     create_user(user_id, None, None)?;
@@ -472,7 +575,14 @@ pub fn save_network_usage_to_db(
     total_downloaded: &str,
     total_uploaded: &str
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping network usage save");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     // Ensure user exists in the users table
     create_user(user_id, None, None)?;
@@ -487,37 +597,58 @@ pub fn save_network_usage_to_db(
 
 // Function to add excluded window to database
 pub fn add_excluded_window_to_db(window_title: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
-    
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping excluded window addition");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
+
     conn.exec_drop(
         "INSERT IGNORE INTO excluded_windows (window_title) VALUES (?)",
         (window_title,)
     )?;
-    
+
     Ok(())
 }
 
 // Function to remove excluded window from database
 pub fn remove_excluded_window_from_db(window_title: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
-    
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping excluded window removal");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
+
     conn.exec_drop(
         "DELETE FROM excluded_windows WHERE window_title = ?",
         (window_title,)
     )?;
-    
+
     Ok(())
 }
 
 // Function to get all excluded windows from database
 pub fn get_excluded_windows_from_db() -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
-    
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty excluded windows list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
+
     let result: Vec<String> = conn
         .query_map("SELECT window_title FROM excluded_windows", |window_title| {
             window_title
         })?;
-    
+
     Ok(result)
 }
 
@@ -527,7 +658,14 @@ pub fn update_process_status_in_db(
     screenshotting_active: bool,
     idle_detection_active: bool
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, log and continue
+        eprintln!("Database not available, skipping process status update");
+        return Ok(());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     conn.exec_drop(
         "UPDATE process_status SET recording_active = ?, screenshotting_active = ?, idle_detection_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
@@ -539,7 +677,14 @@ pub fn update_process_status_in_db(
 
 // Function to get screenshots by session ID from database
 pub fn get_screenshots_by_session(user_id: &str, session_id: &str) -> Result<Vec<ScreenshotData>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty screenshot list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     let result: Vec<ScreenshotData> = conn
         .exec_map(
@@ -562,7 +707,14 @@ pub fn get_screenshots_by_session(user_id: &str, session_id: &str) -> Result<Vec
 
 // Function to get all screenshots from database for a specific user
 pub fn get_all_screenshots(user_id: &str, limit: Option<u32>) -> Result<Vec<ScreenshotData>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty screenshot list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     if let Some(lim) = limit {
         Ok(conn.exec_map(
@@ -599,7 +751,14 @@ pub fn get_all_screenshots(user_id: &str, limit: Option<u32>) -> Result<Vec<Scre
 
 // Function to get recordings from database for a specific user
 pub fn get_recordings(user_id: &str, limit: Option<u32>) -> Result<Vec<RecordingData>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty recording list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     if let Some(lim) = limit {
         Ok(conn.exec_map(
@@ -638,7 +797,14 @@ pub fn get_recordings(user_id: &str, limit: Option<u32>) -> Result<Vec<Recording
 
 // Function to get user activity from database for a specific user
 pub fn get_user_activity(user_id: &str, limit: Option<u32>) -> Result<Vec<UserActivityData>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty user activity list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     if let Some(lim) = limit {
         Ok(conn.exec_map(
@@ -671,7 +837,14 @@ pub fn get_user_activity(user_id: &str, limit: Option<u32>) -> Result<Vec<UserAc
 
 // Function to get network usage from database for a specific user
 pub fn get_network_usage(user_id: &str, limit: Option<u32>) -> Result<Vec<NetworkUsageData>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut conn = DB_POOL.get_conn()?;
+    if !is_database_available() {
+        // If database is not available, return an empty vector
+        eprintln!("Database not available, returning empty network usage list");
+        return Ok(Vec::new());
+    }
+
+    let pool = DB_POOL.as_ref().as_ref().ok_or("Database pool not available")?;
+    let mut conn = pool.get_conn()?;
 
     if let Some(lim) = limit {
         Ok(conn.exec_map(
