@@ -32,7 +32,8 @@ export default defineConfig(async () => ({
     rollupOptions: {
       input: {
         main: './index.html',
-        admin: './src/admin.html'
+        admin: './src/admin.html',
+        welcome: './welcome.html'
       }
     }
   }

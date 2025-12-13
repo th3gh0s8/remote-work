@@ -3,13 +3,65 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
 use std::fs;
+use std::path::PathBuf;
 use lazy_static::lazy_static;
 use screenshots::Screen;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
 use sysinfo::{Networks};
 mod database;
+
+// Global flag to track if database is available
+static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+// Helper function to get the appropriate data directory based on the operating system
+fn get_data_directory() -> PathBuf {
+    // Check if user has specified a custom directory via environment variable
+    if let Ok(custom_path) = std::env::var("REMOTE_WORK_DATA_DIR") {
+        return PathBuf::from(custom_path);
+    }
+
+    if cfg!(target_os = "windows") {
+        // Windows: Use XAMPP htdocs
+        PathBuf::from("C:\\xampp\\htdocs\\remote-work")
+    } else {
+        // Linux/macOS: Use XAMPP htdocs (check common installation locations)
+        // Standard XAMPP location on Linux
+        let xampp_paths = [
+            "/opt/lampp/htdocs/remote-work",  // Standard XAMPP location
+            "/Applications/XAMPP/htdocs/remote-work",  // macOS XAMPP location
+            "/usr/local/xampp/htdocs/remote-work",  // Alternative location
+        ];
+
+        for path_str in &xampp_paths {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        // Fallback to home directory if no XAMPP found
+        let mut path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
+        path.push("remote-work-data");
+        path
+    }
+}
+
+
+
+// Windows-specific imports for system-wide idle detection
+#[cfg(target_os = "windows")]
+use winapi::{
+    um::winuser::{GetLastInputInfo, LASTINPUTINFO},
+    um::sysinfoapi::GetTickCount,
+    shared::minwindef::UINT,
+};
+
+// Global state to track user ID
+lazy_static! {
+    static ref USER_ID: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+}
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -49,6 +101,74 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
+async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_type: String) -> Result<String, String> {
+    use std::fs;
+    use std::path::Path;
+
+    // Define data directory path based on the operating system
+    let data_dir_path = get_data_directory();
+
+    // Create the remote-work directory if it doesn't exist
+    fs::create_dir_all(&data_dir_path).map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    // Create the subdirectory based on file type
+    let file_type_dir = data_dir_path.join(&file_type);
+    fs::create_dir_all(&file_type_dir).map_err(|e| format!("Failed to create {} directory: {}", file_type, e))?;
+
+    // Create the final file path
+    let file_path = file_type_dir.join(&filename);
+
+    // Write the file data to the specified path
+    fs::write(&file_path, file_data).map_err(|e| format!("Failed to write file: {}", e))?;
+
+    // Get user ID before saving to database
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+        // The guard is automatically dropped at the end of this block
+    };
+
+    // Get file size
+    let file_size = std::fs::metadata(&file_path)
+        .map(|meta| Some(meta.len() as i64))
+        .unwrap_or(None);
+
+    // Save file info to database based on file type
+    match file_type.as_str() {
+        "screenshot" => {
+            // Create a session ID for the screenshot
+            let session_id = uuid::Uuid::new_v4().to_string();
+
+            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &file_path.to_string_lossy(), &filename, file_size) {
+                eprintln!("Failed to save screenshot metadata to database: {}", e);
+            }
+        },
+        "recording" => {
+            // Create a session ID for the recording
+            let session_id = uuid::Uuid::new_v4().to_string();
+
+            if let Err(e) = database::save_recording_to_db(
+                &user_id,
+                &session_id,
+                &filename,
+                Some(&file_path.to_string_lossy()),
+                None, // Duration not known yet
+                file_size
+            ) {
+                eprintln!("Failed to save recording metadata to database: {}", e);
+            }
+        },
+        _ => {
+            return Err(format!("Unknown file type: {}", file_type));
+        }
+    }
+
+    // Return the URL where the file can be accessed
+    let file_url = format!("http://localhost/remote-work/{}/{}", file_type, filename);
+    Ok(format!("File saved successfully to: {}, accessible at: {}", file_path.to_string_lossy(), file_url))
+}
+
+#[tauri::command]
 async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
     // Clean up inactive tasks by removing entries with Stopped status
     {
@@ -76,9 +196,9 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
     // Create a unique session ID
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Create screenshots directory
-    let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
-    dir.push("screenshots");
+    // Create screenshots directory in data directory
+    let data_dir_path = get_data_directory();
+    let dir = data_dir_path.join("screenshots");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     // Store task state as active
@@ -179,21 +299,51 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                     }
                                 }
 
-                                // Convert image to bytes for storage in MySQL
-                                let mut img_bytes: Vec<u8> = Vec::new();
-                                if let Ok(_) = img.write_to(&mut std::io::Cursor::new(&mut img_bytes), image::ImageFormat::Png) {
-                                    let timestamp = start_time.elapsed().as_millis();
-                                    let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
+                                let timestamp = start_time.elapsed().as_millis();
+                                let filename = format!("screenshot_{}_{}.png", session_id_clone, timestamp);
 
-                                    // Save screenshot to MySQL database
-                                    if let Err(e) = database::save_screenshot_to_db(&session_id_clone, img_bytes, &filename) {
-                                        eprintln!("Failed to save screenshot to database: {}", e);
+                                // Create path to screenshots directory in data directory
+                                let mut screenshots_dir = get_data_directory().join("screenshots");
+                                if let Err(e) = std::fs::create_dir_all(&screenshots_dir) {
+                                    eprintln!("Failed to create screenshots directory in data directory: {}", e);
+                                    // Try to create in temp directory as fallback
+                                    screenshots_dir = std::env::temp_dir();
+                                    screenshots_dir.push("remote-work-screenshots");
+                                    if let Err(e) = std::fs::create_dir_all(&screenshots_dir) {
+                                        eprintln!("Failed to create screenshots directory in temp: {}", e);
+                                        return;
+                                    }
+                                }
+
+                                // Create file path
+                                let file_path = screenshots_dir.join(&filename);
+
+                                // Save image to local file
+                                if let Err(e) = img.save(&file_path) {
+                                    eprintln!("Failed to save screenshot to file: {}", e);
+                                } else {
+                                    // Get user ID before saving to database
+                                    let user_id = {
+                                        let user_id_guard = USER_ID.lock().unwrap();
+                                        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                                        // The guard is automatically dropped at the end of this block
+                                    };
+
+                                    // Get file size
+                                    let file_size = std::fs::metadata(&file_path)
+                                        .map(|meta| Some(meta.len() as i64))
+                                        .unwrap_or(None);
+
+                                    // Ensure file_path is a string for database storage
+                                    let file_path_str = file_path.to_string_lossy().to_string();
+
+                                    // Save screenshot metadata to MySQL database
+                                    if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id_clone, &file_path_str, &filename, file_size) {
+                                        eprintln!("Failed to save screenshot metadata to database: {}", e);
                                     } else {
                                         // Notify that screenshot was taken
-                                        window.emit("screenshot-taken", format!("Screenshot saved to database: {}", filename)).unwrap();
+                                        window.emit("screenshot-taken", format!("Screenshot saved to file: {}", filename)).unwrap();
                                     }
-                                } else {
-                                    eprintln!("Failed to convert image to bytes");
                                 }
                             }
                             Err(e) => {
@@ -278,6 +428,8 @@ lazy_static! {
     static ref SCREENSHOT_MAX_INTERVAL: Arc<Mutex<u64>> = Arc::new(Mutex::new(1800)); // Default 30 minutes in seconds
     static ref RECORDING_BASE_PATH: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None)); // Store base recording path
     static ref RECORDING_SESSION_ID: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None)); // Store session ID
+    static ref IDLE_MONITORING_TASK: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None)); // Background idle monitoring task
+    static ref LAST_IDLE_STATUS: Arc<Mutex<String>> = Arc::new(Mutex::new("active".to_string())); // Cache last idle status
 }
 
 
@@ -292,9 +444,9 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
         drop(process_guard);
     }
 
-    // Create recordings directory
-    let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
-    dir.push("recordings");
+    // Create recordings directory in data directory
+    let data_dir_path = get_data_directory();
+    let dir = data_dir_path.join("recordings");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     // Create unique session ID
@@ -386,12 +538,30 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                 .spawn()
                 .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
+            // On Linux, use x11grab for screen capture
             Command::new(&ffmpeg_cmd)
                 .args(&[
-                    "-f", "gdigrab",
-                    "-i", "desktop",
+                    "-f", "x11grab",
+                    "-i", &std::env::var("DISPLAY").unwrap_or_else(|_| ":0.0".to_string()),
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, use avfoundation for screen capture
+            Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "avfoundation",
+                    "-i", "default",
                     "-vcodec", "libx264",
                     "-crf", "28",
                     "-preset", "ultrafast",
@@ -416,8 +586,16 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
         files_guard.push_back(video_path_str.clone());
     }
 
+    // Get user ID before saving to database
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+        // The guard is automatically dropped at the end of this block
+    };
+
     // Save the main recording metadata to database
     if let Err(e) = database::save_recording_to_db(
+        &user_id,
         &session_id,
         &format!("recording_{}.mkv", session_id),
         Some(&video_path_str),
@@ -548,19 +726,51 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                     }
                                 }
 
-                                // Convert image to bytes for storage in MySQL
-                                let mut img_bytes: Vec<u8> = Vec::new();
-                                if let Ok(_) = img.write_to(&mut std::io::Cursor::new(&mut img_bytes), image::ImageFormat::Png) {
-                                    let timestamp = start_time.elapsed().as_millis();
-                                    let filename = format!("snapshot_{}_{}.png", screenshot_session_id, timestamp);
+                                let timestamp = start_time.elapsed().as_millis();
+                                let filename = format!("snapshot_{}_{}.png", screenshot_session_id, timestamp);
 
-                                    // Save snapshot to MySQL database
-                                    if let Err(e) = database::save_screenshot_to_db(&screenshot_session_id, img_bytes, &filename) {
-                                        eprintln!("Failed to save snapshot to database: {}", e);
+                                // Create path to screenshots directory in data directory
+                                let mut screenshots_dir = get_data_directory().join("screenshots");
+                                if let Err(e) = std::fs::create_dir_all(&screenshots_dir) {
+                                    eprintln!("Failed to create screenshots directory in data directory: {}", e);
+                                    // Try to create in temp directory as fallback
+                                    screenshots_dir = std::env::temp_dir();
+                                    screenshots_dir.push("remote-work-screenshots");
+                                    if let Err(e) = std::fs::create_dir_all(&screenshots_dir) {
+                                        eprintln!("Failed to create screenshots directory in temp: {}", e);
+                                        return;
+                                    }
+                                }
+
+                                // Create file path
+                                let file_path = screenshots_dir.join(&filename);
+
+                                // Save image to local file
+                                if let Err(e) = img.save(&file_path) {
+                                    eprintln!("Failed to save snapshot to file: {}", e);
+                                } else {
+                                    // Get user ID before saving to database
+                                    let user_id = {
+                                        let user_id_guard = USER_ID.lock().unwrap();
+                                        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                                        // The guard is automatically dropped at the end of this block
+                                    };
+
+                                    // Get file size
+                                    let file_size = std::fs::metadata(&file_path)
+                                        .map(|meta| Some(meta.len() as i64))
+                                        .unwrap_or(None);
+
+                                    // Ensure file_path is a string for database storage
+                                    let file_path_str = file_path.to_string_lossy().to_string();
+
+                                    // Save snapshot metadata to MySQL database
+                                    if let Err(e) = database::save_screenshot_to_db(&user_id, &screenshot_session_id, &file_path_str, &filename, file_size) {
+                                        eprintln!("Failed to save snapshot metadata to database: {}", e);
                                     } else {
                                         // Emit to all windows for screenshot
                                         for (_window_label, window) in app_for_screenshot.webview_windows() {
-                                            let _ = window.emit("screenshot-taken", format!("Snapshot saved to database: {}", filename));
+                                            let _ = window.emit("screenshot-taken", format!("Snapshot saved to file: {}", filename));
                                         }
                                         // Note: Keeping event name as screenshot-taken for compatibility
                                         // Update user activity since a snapshot was just taken (user is likely active)
@@ -568,8 +778,6 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                             *last_activity = SystemTime::now();
                                         }
                                     }
-                                } else {
-                                    eprintln!("Failed to convert image to bytes");
                                 }
                             }
                             Err(e) => {
@@ -705,7 +913,6 @@ use EXCLUDED_WINDOWS as RUNNING_EXCLUDED_WINDOWS;
 
 
 
-use tauri::Manager;
 
 #[cfg(target_os = "windows")]
 mod windows_utils {
@@ -868,6 +1075,225 @@ fn update_user_activity() {
 }
 
 #[tauri::command]
+fn get_user_idle_status() -> Result<String, String> {
+    let last_activity = LAST_USER_ACTIVITY.lock().map_err(|e| e.to_string())?;
+
+    if let Ok(elapsed) = last_activity.elapsed() {
+        let elapsed_seconds = elapsed.as_secs();
+
+        let status = if elapsed_seconds >= 300 {  // 5 minutes
+            "idle"
+        } else if elapsed_seconds >= 30 {  // 30 seconds
+            "idle"
+        } else {
+            "active"
+        };
+
+        Ok(format!(r#"{{"status": "{}", "lastActivitySeconds": {}}}"#, status, elapsed_seconds))
+    } else {
+        Err("Failed to calculate elapsed time".to_string())
+    }
+}
+
+#[tauri::command]
+fn get_system_idle_status() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::mem;
+
+        unsafe {
+            let mut last_input_info: LASTINPUTINFO = mem::zeroed();
+            last_input_info.cbSize = mem::size_of::<LASTINPUTINFO>() as UINT;
+
+            if GetLastInputInfo(&mut last_input_info) == 0 {
+                return Err("Failed to get last input info".to_string());
+            }
+
+            // Get the tick count when the last input occurred
+            let last_input_tick = last_input_info.dwTime;
+
+            // Get the current tick count
+            let current_tick = GetTickCount();
+
+            // Calculate the idle time in milliseconds, handling potential tick count wraparound
+            // GetTickCount returns a u32 that wraps around after about 49.7 days
+            let idle_time_ms = (current_tick as u32).wrapping_sub(last_input_tick as u32);
+
+            let idle_time_seconds = idle_time_ms / 1000;
+
+            let status = if idle_time_seconds >= 300 {  // 5 minutes
+                "idle"
+            } else if idle_time_seconds >= 30 {  // 30 seconds
+                "idle"
+            } else {
+                "active"
+            };
+
+            Ok(format!(r#"{{"status": "{}", "idleTimeSeconds": {}}}"#, status, idle_time_seconds))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Using x11rb to get idle time on Linux
+        use std::env;
+        use std::process::Command;
+
+        // Try using the X11 idle time if available
+        if let Ok(display) = env::var("DISPLAY") {
+            if !display.is_empty() {
+                // Use xprintidle to get the idle time in milliseconds
+                match Command::new("xprintidle").output() {
+                    Ok(output) => {
+                        if let Ok(idle_str) = String::from_utf8(output.stdout) {
+                            if let Ok(idle_ms) = idle_str.trim().parse::<u64>() {
+                                let idle_seconds = idle_ms / 1000;
+
+                                let status = if idle_seconds >= 300 {  // 5 minutes
+                                    "idle"
+                                } else if idle_seconds >= 30 {  // 30 seconds
+                                    "idle"
+                                } else {
+                                    "active"
+                                };
+
+                                return Ok(format!(r#"{{"status": "{}", "idleTimeSeconds": {}}}"#, status, idle_seconds));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // xprintidle command not available, fall back to other methods
+                        // For now, return active status
+                        return Ok(r#"{"status": "active", "idleTimeSeconds": 0}"#.to_string());
+                    }
+                }
+            }
+        }
+
+        // If running without X11 or xprintidle failed, return active
+        Ok(r#"{"status": "active", "idleTimeSeconds": 0}"#.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // Use 'ioreg' to get system idle time on macOS
+        match Command::new("ioreg")
+            .args(&["-c", "IOHIDSystem"])
+            .args(&["-r", "-k", "HIDIdleTime"])
+            .output() {
+            Ok(output) => {
+                if let Ok(ioreg_output) = String::from_utf8(output.stdout) {
+                    // Parse the idle time from ioreg output (in nanoseconds)
+                    if let Some(line) = ioreg_output.lines().find(|line| line.contains("HIDIdleTime")) {
+                        if let Some(nanoseconds_str) = line.split('=').nth(1) {
+                            if let Ok(nanoseconds) = nanoseconds_str.trim().parse::<u64>() {
+                                // Convert nanoseconds to seconds
+                                let idle_seconds = (nanoseconds / 1_000_000_000) as u64;
+
+                                let status = if idle_seconds >= 300 {  // 5 minutes
+                                    "idle"
+                                } else if idle_seconds >= 30 {  // 30 seconds
+                                    "idle"
+                                } else {
+                                    "active"
+                                };
+
+                                return Ok(format!(r#"{{"status": "{}", "idleTimeSeconds": {}}}"#, status, idle_seconds));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // ioreg command not available or failed
+            }
+        }
+
+        // Fallback for macOS if ioreg is not available
+        Ok(r#"{"status": "active", "idleTimeSeconds": 0}"#.to_string())
+    }
+}
+
+#[tauri::command]
+async fn start_system_idle_monitoring(app_handle: tauri::AppHandle) -> Result<String, String> {
+    // Check if idle monitoring is already running
+    {
+        let task_guard = IDLE_MONITORING_TASK.lock().map_err(|e| e.to_string())?;
+        if task_guard.is_some() {
+            return Err("System idle monitoring is already running".to_string());
+        }
+        drop(task_guard);
+    }
+
+    // Start the idle monitoring task in the background
+    let app_handle_clone = app_handle.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            // Use a more reliable sleep that won't be affected by throttling
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+            // Get all windows to emit the event
+            let windows = app_handle_clone.webview_windows();
+
+            match get_system_idle_status() {
+                Ok(status_json) => {
+                    if let Ok(status) = serde_json::from_str::<serde_json::Value>(&status_json) {
+                        let current_status = status["status"].as_str().unwrap_or("active");
+
+                        // Update cached status
+                        {
+                            if let Ok(mut cached_status) = LAST_IDLE_STATUS.lock() {
+                                *cached_status = current_status.to_string();
+                            }
+                        }
+
+                        // Emit idle status update to all windows
+                        for (_label, window) in windows {
+                            let _ = window.emit("system-idle-status", &status_json);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error getting system idle status: {}", e);
+                    // Emit error status
+                    let error_json = r#"{"status": "error", "idleTimeSeconds": 0}"#;
+                    for (_label, window) in windows {
+                        let _ = window.emit("system-idle-status", error_json);
+                    }
+                }
+            }
+        }
+    });
+
+    // Store the task handle
+    {
+        let mut task_guard = IDLE_MONITORING_TASK.lock().map_err(|e| e.to_string())?;
+        *task_guard = Some(task);
+    }
+
+    Ok("System idle monitoring started".to_string())
+}
+
+#[tauri::command]
+fn get_cached_idle_status() -> Result<String, String> {
+    let cached_status = LAST_IDLE_STATUS.lock().map_err(|e| format!("Failed to acquire idle status lock: {}", e))?;
+    Ok(cached_status.clone())
+}
+
+#[tauri::command]
+async fn stop_system_idle_monitoring() -> Result<String, String> {
+    let mut task_guard = IDLE_MONITORING_TASK.lock().map_err(|e| e.to_string())?;
+
+    if let Some(task) = task_guard.take() {
+        task.abort();
+    }
+
+    Ok("System idle monitoring stopped".to_string())
+}
+
+#[tauri::command]
 async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
     // Check if idle detection is already running
     {
@@ -890,20 +1316,38 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
 
                     if idle_duration_seconds >= 300 {  // If idle for 5+ minutes (300 seconds)
                         window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_seconds / 60)).unwrap();
+                        // Get user ID before saving to database
+                        let user_id = {
+                            let user_id_guard = USER_ID.lock().unwrap();
+                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            // The guard is automatically dropped at the end of this block
+                        };
                         // Save idle activity to database
-                        if let Err(e) = database::save_user_activity_to_db("idle", Some(idle_duration_seconds)) {
+                        if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
                             eprintln!("Failed to save user idle activity to database: {}", e);
                         }
                     } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds
                         window_clone.emit("user-idle", format!("User has been idle for {} seconds", elapsed.as_secs())).unwrap();
+                        // Get user ID before saving to database
+                        let user_id = {
+                            let user_id_guard = USER_ID.lock().unwrap();
+                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            // The guard is automatically dropped at the end of this block
+                        };
                         // Save idle activity to database
-                        if let Err(e) = database::save_user_activity_to_db("idle", Some(idle_duration_seconds)) {
+                        if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
                             eprintln!("Failed to save user idle activity to database: {}", e);
                         }
                     } else {  // User is active
                         window_clone.emit("user-active", format!("User active, last activity {} seconds ago", elapsed.as_secs())).unwrap();
+                        // Get user ID before saving to database
+                        let user_id = {
+                            let user_id_guard = USER_ID.lock().unwrap();
+                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            // The guard is automatically dropped at the end of this block
+                        };
                         // Save active activity to database
-                        if let Err(e) = database::save_user_activity_to_db("active", Some(elapsed.as_secs() as i32)) {
+                        if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(elapsed.as_secs() as i32)) {
                             eprintln!("Failed to save user active activity to database: {}", e);
                         }
                     }
@@ -938,126 +1382,125 @@ async fn download_ffmpeg_bundled(window: tauri::Window, ffmpeg_path: &std::path:
     use futures_util::StreamExt;
 
     // Determine the appropriate FFmpeg build based on the platform
-    let (download_url, executable_name): (&'static str, &'static str) = {
-        #[cfg(target_os = "windows")]
-        {
-            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // For macOS, we would need a different URL
-            return Err("macOS automatic FFmpeg download not implemented".into());
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // For Linux, we would need a different URL
-            return Err("Linux automatic FFmpeg download not implemented".into());
-        }
-    };
+    #[cfg(target_os = "windows")]
+    {
+        let (download_url, executable_name): (&str, &str) =
+            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe");
 
-    // Create HTTP client with timeout
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
-        .build()?;
+        // Create HTTP client with timeout
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+            .build()?;
 
-    // Create file paths outside the loop
-    let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
+        // Create file paths outside the loop
+        let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
 
-    // Attempt download with retry logic
-    let mut last_error = None;
-    let mut downloaded_successfully = false;
+        // Attempt download with retry logic
+        let mut last_error = None;
+        let mut downloaded_successfully = false;
 
-    for attempt in 1..=3 {
-        println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
+        for attempt in 1..=3 {
+            println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
 
-        match client.get(download_url).send().await {
-            Ok(response) => {
-                // Download was successful, proceed with saving
-                let total_size = response.content_length().unwrap_or(0);
-
-                if total_size > 0 {
-                    window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0))).unwrap();
-                }
-
-                // Create a temporary file to save the download
-                let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
-
-                // Stream the download with progress tracking
-                let mut downloaded: u64 = 0;
-                let mut stream = response.bytes_stream();
-
-                while let Some(chunk_result) = stream.next().await {
-                    let chunk = chunk_result?;
-                    temp_file.write_all(&chunk).await?;
-                    downloaded += chunk.len() as u64;
+            match client.get(download_url).send().await {
+                Ok(response) => {
+                    // Download was successful, proceed with saving
+                    let total_size = response.content_length().unwrap_or(0);
 
                     if total_size > 0 {
-                        let progress = (downloaded as f64 / total_size as f64) * 100.0;
-                        window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress)).unwrap();
+                        window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0))).unwrap();
+                    }
+
+                    // Create a temporary file to save the download
+                    let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
+
+                    // Stream the download with progress tracking
+                    let mut downloaded: u64 = 0;
+                    let mut stream = response.bytes_stream();
+
+                    while let Some(chunk_result) = stream.next().await {
+                        let chunk = chunk_result?;
+                        temp_file.write_all(&chunk).await?;
+                        downloaded += chunk.len() as u64;
+
+                        if total_size > 0 {
+                            let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                            window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress)).unwrap();
+                        }
+                    }
+
+                    temp_file.flush().await?;
+                    drop(temp_file); // Close the file before processing
+                    downloaded_successfully = true;
+                    break; // Download successful, exit retry loop
+                }
+                Err(e) => {
+                    eprintln!("Download attempt {} failed: {}", attempt, e);
+                    last_error = Some(e);
+                    if attempt < 3 {
+                        // Wait before retrying (but not after the last attempt)
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
                 }
-
-                temp_file.flush().await?;
-                drop(temp_file); // Close the file before processing
-                downloaded_successfully = true;
-                break; // Download successful, exit retry loop
             }
-            Err(e) => {
-                eprintln!("Download attempt {} failed: {}", attempt, e);
-                last_error = Some(e);
-                if attempt < 3 {
-                    // Wait before retrying (but not after the last attempt)
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // If all attempts failed, return the last error
+        if !downloaded_successfully {
+            if let Some(error) = last_error {
+                return Err(error.into());
+            } else {
+                return Err("Download failed for unknown reasons".into());
+            }
+        }
+
+        // Extract the ZIP file
+        let zip_file = std::fs::File::open(&temp_zip_path)?;
+        let mut archive = zip::ZipArchive::new(zip_file)?;
+
+        // Look for the executable in the archive
+        let mut found_executable = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let filename = file.name().to_lowercase();
+
+            // Look for the executable file
+            if filename.ends_with(executable_name) {
+                // Extract this specific file to the target location
+                let mut output_file = File::create(ffmpeg_path)?;
+                std::io::copy(&mut file, &mut output_file)?;
+                output_file.sync_all()?;
+
+                // Make it executable on Unix systems (not needed on Windows)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
                 }
+
+                found_executable = true;
+                break;
             }
         }
-    }
 
-    // If all attempts failed, return the last error
-    if !downloaded_successfully {
-        if let Some(error) = last_error {
-            return Err(error.into());
+        // Delete the temporary ZIP file
+        std::fs::remove_file(&temp_zip_path)?;
+
+        if found_executable {
+            Ok(())
         } else {
-            return Err("Download failed for unknown reasons".into());
+            Err(format!("{} not found in the downloaded archive", executable_name).into())
         }
     }
-
-    // Extract the ZIP file
-    let zip_file = std::fs::File::open(&temp_zip_path)?;
-    let mut archive = zip::ZipArchive::new(zip_file)?;
-
-    // Look for the executable in the archive
-    let mut found_executable = false;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let filename = file.name().to_lowercase();
-
-        // Look for the executable file
-        if filename.ends_with(executable_name) {
-            // Extract this specific file to the target location
-            let mut output_file = File::create(ffmpeg_path)?;
-            std::io::copy(&mut file, &mut output_file)?;
-            output_file.sync_all()?;
-
-            // Make it executable on Unix systems (not needed on Windows)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
-            }
-
-            found_executable = true;
-            break;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        // For macOS, we would need a different URL
+        return Err("macOS automatic FFmpeg download not implemented".into());
     }
-
-    // Delete the temporary ZIP file
-    std::fs::remove_file(&temp_zip_path)?;
-
-    if found_executable {
-        Ok(())
-    } else {
-        Err(format!("{} not found in the downloaded archive", executable_name).into())
+    #[cfg(target_os = "linux")]
+    {
+        // For Linux, we would need a different URL
+        return Err("Linux automatic FFmpeg download not implemented".into());
     }
 }
 
@@ -1066,130 +1509,129 @@ async fn download_ffmpeg_bundled_app(app: &tauri::AppHandle, ffmpeg_path: &std::
     use futures_util::StreamExt;
 
     // Determine the appropriate FFmpeg build based on the platform
-    let (download_url, executable_name): (&'static str, &'static str) = {
-        #[cfg(target_os = "windows")]
-        {
-            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe")
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // For macOS, we would need a different URL
-            return Err("macOS automatic FFmpeg download not implemented".into());
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // For Linux, we would need a different URL
-            return Err("Linux automatic FFmpeg download not implemented".into());
-        }
-    };
+    #[cfg(target_os = "windows")]
+    {
+        let (download_url, executable_name): (&str, &str) =
+            ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip", "ffmpeg.exe");
 
-    // Create HTTP client with timeout
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
-        .build()?;
+        // Create HTTP client with timeout
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout
+            .build()?;
 
-    // Create file paths outside the loop
-    let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
+        // Create file paths outside the loop
+        let temp_zip_path = ffmpeg_path.parent().unwrap().join("ffmpeg_temp.zip");
 
-    // Attempt download with retry logic
-    let mut last_error = None;
-    let mut downloaded_successfully = false;
+        // Attempt download with retry logic
+        let mut last_error = None;
+        let mut downloaded_successfully = false;
 
-    for attempt in 1..=3 {
-        println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
+        for attempt in 1..=3 {
+            println!("Downloading FFmpeg from: {} (attempt {}/{})", download_url, attempt, 3);
 
-        match client.get(download_url).send().await {
-            Ok(response) => {
-                // Download was successful, proceed with saving
-                let total_size = response.content_length().unwrap_or(0);
-
-                if total_size > 0 {
-                    for (_window_label, window) in app.webview_windows() {
-                        let _ = window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0)));
-                    }
-                }
-
-                // Create a temporary file to save the download
-                let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
-
-                // Stream the download with progress tracking
-                let mut downloaded: u64 = 0;
-                let mut stream = response.bytes_stream();
-
-                while let Some(chunk_result) = stream.next().await {
-                    let chunk = chunk_result?;
-                    temp_file.write_all(&chunk).await?;
-                    downloaded += chunk.len() as u64;
+            match client.get(download_url).send().await {
+                Ok(response) => {
+                    // Download was successful, proceed with saving
+                    let total_size = response.content_length().unwrap_or(0);
 
                     if total_size > 0 {
-                        let progress = (downloaded as f64 / total_size as f64) * 100.0;
                         for (_window_label, window) in app.webview_windows() {
-                            let _ = window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress));
+                            let _ = window.emit("recording-progress", format!("Starting FFmpeg download ({:.2} MB)...", total_size as f64 / (1024.0 * 1024.0)));
                         }
                     }
-                }
 
-                temp_file.flush().await?;
-                drop(temp_file); // Close the file before processing
-                downloaded_successfully = true;
-                break; // Download successful, exit retry loop
-            }
-            Err(e) => {
-                eprintln!("Download attempt {} failed: {}", attempt, e);
-                last_error = Some(e);
-                if attempt < 3 {
-                    // Wait before retrying (but not after the last attempt)
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Create a temporary file to save the download
+                    let mut temp_file = tokio::fs::File::create(&temp_zip_path).await?;
+
+                    // Stream the download with progress tracking
+                    let mut downloaded: u64 = 0;
+                    let mut stream = response.bytes_stream();
+
+                    while let Some(chunk_result) = stream.next().await {
+                        let chunk = chunk_result?;
+                        temp_file.write_all(&chunk).await?;
+                        downloaded += chunk.len() as u64;
+
+                        if total_size > 0 {
+                            let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                            for (_window_label, window) in app.webview_windows() {
+                                let _ = window.emit("recording-progress", format!("Downloading FFmpeg: {:.1}%...", progress));
+                            }
+                        }
+                    }
+
+                    temp_file.flush().await?;
+                    drop(temp_file); // Close the file before processing
+                    downloaded_successfully = true;
+                    break; // Download successful, exit retry loop
+                }
+                Err(e) => {
+                    eprintln!("Download attempt {} failed: {}", attempt, e);
+                    last_error = Some(e);
+                    if attempt < 3 {
+                        // Wait before retrying (but not after the last attempt)
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    }
                 }
             }
         }
-    }
 
-    // If all attempts failed, return the last error
-    if !downloaded_successfully {
-        if let Some(error) = last_error {
-            return Err(error.into());
+        // If all attempts failed, return the last error
+        if !downloaded_successfully {
+            if let Some(error) = last_error {
+                return Err(error.into());
+            } else {
+                return Err("Download failed for unknown reasons".into());
+            }
+        }
+
+        // Extract the ZIP file
+        let zip_file = std::fs::File::open(&temp_zip_path)?;
+        let mut archive = zip::ZipArchive::new(zip_file)?;
+
+        // Look for the executable in the archive
+        let mut found_executable = false;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)?;
+            let filename = file.name().to_lowercase();
+
+            // Look for the executable file
+            if filename.ends_with(executable_name) {
+                // Extract this specific file to the target location
+                let mut output_file = File::create(ffmpeg_path)?;
+                std::io::copy(&mut file, &mut output_file)?;
+                output_file.sync_all()?;
+
+                // Make it executable on Unix systems (not needed on Windows)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
+                }
+
+                found_executable = true;
+                break;
+            }
+        }
+
+        // Delete the temporary ZIP file
+        std::fs::remove_file(&temp_zip_path)?;
+
+        if found_executable {
+            Ok(())
         } else {
-            return Err("Download failed for unknown reasons".into());
+            Err(format!("{} not found in the downloaded archive", executable_name).into())
         }
     }
-
-    // Extract the ZIP file
-    let zip_file = std::fs::File::open(&temp_zip_path)?;
-    let mut archive = zip::ZipArchive::new(zip_file)?;
-
-    // Look for the executable in the archive
-    let mut found_executable = false;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let filename = file.name().to_lowercase();
-
-        // Look for the executable file
-        if filename.ends_with(executable_name) {
-            // Extract this specific file to the target location
-            let mut output_file = File::create(ffmpeg_path)?;
-            std::io::copy(&mut file, &mut output_file)?;
-            output_file.sync_all()?;
-
-            // Make it executable on Unix systems (not needed on Windows)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(ffmpeg_path, std::fs::Permissions::from_mode(0o755))?;
-            }
-
-            found_executable = true;
-            break;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        // For macOS, we would need a different URL
+        return Err("macOS automatic FFmpeg download not implemented".into());
     }
-
-    // Delete the temporary ZIP file
-    std::fs::remove_file(&temp_zip_path)?;
-
-    if found_executable {
-        Ok(())
-    } else {
-        Err(format!("{} not found in the downloaded archive", executable_name).into())
+    #[cfg(target_os = "linux")]
+    {
+        // For Linux, we would need a different URL
+        return Err("Linux automatic FFmpeg download not implemented".into());
     }
 }
 
@@ -1611,12 +2053,30 @@ async fn start_new_recording_segment() -> Result<String, String> {
                 .spawn()
                 .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
+            // On Linux, use x11grab for screen capture
             std::process::Command::new(&ffmpeg_cmd)
                 .args(&[
-                    "-f", "gdigrab",
-                    "-i", "desktop",
+                    "-f", "x11grab",
+                    "-i", &std::env::var("DISPLAY").unwrap_or_else(|_| ":0.0".to_string()),
+                    "-vcodec", "libx264",
+                    "-crf", "28",
+                    "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    &video_path_str
+                ])
+                .spawn()
+                .map_err(|e| format!("Failed to start FFmpeg for recording: {}", e))?
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, use avfoundation for screen capture
+            std::process::Command::new(&ffmpeg_cmd)
+                .args(&[
+                    "-f", "avfoundation",
+                    "-i", "default",
                     "-vcodec", "libx264",
                     "-crf", "28",
                     "-preset", "ultrafast",
@@ -1647,6 +2107,13 @@ async fn start_new_recording_segment() -> Result<String, String> {
         files_guard.push_back(video_path_str.clone());
     }
 
+    // Get user ID before saving to database
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+        // The guard is automatically dropped at the end of this block
+    };
+
     // Get the main recording ID from the database
     let recording_id = match database::get_recording_id_by_session(&session_id) {
         Ok(Some(id)) => id,
@@ -1667,6 +2134,7 @@ async fn start_new_recording_segment() -> Result<String, String> {
     };
 
     if let Err(e) = database::save_recording_segment_to_db(
+        &user_id,
         recording_id,
         segment_index as i32,
         &format!("recording_{}_seg_{}.mkv", session_id, segment_index),
@@ -1737,6 +2205,104 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
     Ok(format!("Recording resumed successfully - {}", result))
 }
 
+// Command to set user ID
+#[tauri::command]
+async fn set_user_id(user_id: String) -> Result<String, String> {
+    let mut user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    *user_id_guard = Some(user_id.clone());
+    drop(user_id_guard); // Release the lock early
+
+    Ok(format!("User ID set successfully: {}", user_id))
+}
+
+// Command to get current user ID
+#[tauri::command]
+async fn get_user_id() -> Result<String, String> {
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    match user_id_guard.as_ref() {
+        Some(id) => Ok(id.clone()),
+        None => Err("User ID not set".to_string())
+    }
+}
+
+// Command to check if user ID is set
+#[tauri::command]
+async fn is_user_id_set() -> Result<bool, String> {
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    Ok(user_id_guard.is_some())
+}
+
+// Function to check if user ID is set (sync version for setup)
+pub fn is_user_id_set_sync() -> bool {
+    match USER_ID.lock() {
+        Ok(user_id_guard) => user_id_guard.is_some(),
+        Err(_) => false,  // If we can't acquire the lock, assume user ID is not set
+    }
+}
+
+
+// Database user management commands
+
+#[tauri::command]
+async fn create_user(user_id: String, username: Option<String>, email: Option<String>) -> Result<String, String> {
+    if !database::is_database_available() {
+        return Err("Database is not available. Data will be stored when database is back online.".to_string());
+    }
+
+    match database::create_user(&user_id, username.as_deref(), email.as_deref()) {
+        Ok(()) => Ok(format!("User {} created/updated successfully", user_id)),
+        Err(e) => Err(format!("Failed to create/update user: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn get_user(user_id: String) -> Result<String, String> {
+    if !database::is_database_available() {
+        return Err("Database is not available. Cannot retrieve data.".to_string());
+    }
+
+    match database::get_user(&user_id) {
+        Ok(Some(user_info)) => {
+            match serde_json::to_string(&user_info) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize user info: {}", e)),
+            }
+        },
+        Ok(None) => Err("User not found".to_string()),
+        Err(e) => Err(format!("Failed to get user: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn get_all_users(limit: Option<u32>) -> Result<String, String> {
+    if !database::is_database_available() {
+        return Err("Database is not available. Cannot retrieve data.".to_string());
+    }
+
+    match database::get_all_users(limit) {
+        Ok(users) => {
+            match serde_json::to_string(&users) {
+                Ok(json) => Ok(json),
+                Err(e) => Err(format!("Failed to serialize users: {}", e)),
+            }
+        },
+        Err(e) => Err(format!("Failed to get users: {}", e)),
+    }
+}
+
+#[tauri::command]
+async fn user_exists(user_id: String) -> Result<bool, String> {
+    if !database::is_database_available() {
+        // If database is not available, assume user doesn't exist
+        return Ok(false);
+    }
+
+    match database::user_exists(&user_id) {
+        Ok(exists) => Ok(exists),
+        Err(e) => Err(format!("Failed to check if user exists: {}", e)),
+    }
+}
+
 #[tauri::command]
 async fn get_network_stats() -> Result<String, String> {
     let stats = NETWORK_STATS.lock().unwrap();
@@ -1793,7 +2359,7 @@ async fn get_global_network_stats() -> Result<String, String> {
         total_bytes_uploaded += network.total_transmitted();
     }
 
-    let mut global_stats = GLOBAL_NETWORK_STATS.lock().unwrap();
+    let mut global_stats = GLOBAL_NETWORK_STATS.lock().map_err(|e| format!("Failed to acquire global network stats lock: {}", e))?;
     let duration = global_stats.last_updated.elapsed().as_secs_f64();
 
     // Calculate speeds (bytes per second)
@@ -1878,8 +2444,16 @@ async fn update_network_usage(downloaded_bytes: u64, uploaded_bytes: u64) -> Res
         format!("{:.2} KB/s", upload_speed / 1024.0)
     };
 
+    // Get user ID before saving to database
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+        // The guard is automatically dropped at the end of this block
+    };
+
     // Save network usage to database
     if let Err(e) = database::save_network_usage_to_db(
+        &user_id,
         &download_speed_str,
         &upload_speed_str,
         &total_downloaded_mb,
@@ -1930,7 +2504,12 @@ async fn set_screenshot_intervals(min_minutes: u64, max_minutes: u64) -> Result<
 
 #[tauri::command]
 async fn get_screenshots_by_session(session_id: String) -> Result<String, String> {
-    match database::get_screenshots_by_session(&session_id) {
+    // Get user ID before retrieving data
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    let user_id = user_id_guard.as_ref().ok_or("User ID not set")?.clone();
+    drop(user_id_guard); // Release the lock early
+
+    match database::get_screenshots_by_session(&user_id, &session_id) {
         Ok(screenshots) => {
             match serde_json::to_string(&screenshots) {
                 Ok(json) => Ok(json),
@@ -1943,7 +2522,12 @@ async fn get_screenshots_by_session(session_id: String) -> Result<String, String
 
 #[tauri::command]
 async fn get_all_screenshots(limit: Option<u32>) -> Result<String, String> {
-    match database::get_all_screenshots(limit) {
+    // Get user ID before retrieving data
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    let user_id = user_id_guard.as_ref().ok_or("User ID not set")?.clone();
+    drop(user_id_guard); // Release the lock early
+
+    match database::get_all_screenshots(&user_id, limit) {
         Ok(screenshots) => {
             match serde_json::to_string(&screenshots) {
                 Ok(json) => Ok(json),
@@ -1956,7 +2540,12 @@ async fn get_all_screenshots(limit: Option<u32>) -> Result<String, String> {
 
 #[tauri::command]
 async fn get_recordings(limit: Option<u32>) -> Result<String, String> {
-    match database::get_recordings(limit) {
+    // Get user ID before retrieving data
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    let user_id = user_id_guard.as_ref().ok_or("User ID not set")?.clone();
+    drop(user_id_guard); // Release the lock early
+
+    match database::get_recordings(&user_id, limit) {
         Ok(recordings) => {
             match serde_json::to_string(&recordings) {
                 Ok(json) => Ok(json),
@@ -1969,7 +2558,12 @@ async fn get_recordings(limit: Option<u32>) -> Result<String, String> {
 
 #[tauri::command]
 async fn get_user_activity(limit: Option<u32>) -> Result<String, String> {
-    match database::get_user_activity(limit) {
+    // Get user ID before retrieving data
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    let user_id = user_id_guard.as_ref().ok_or("User ID not set")?.clone();
+    drop(user_id_guard); // Release the lock early
+
+    match database::get_user_activity(&user_id, limit) {
         Ok(activity) => {
             match serde_json::to_string(&activity) {
                 Ok(json) => Ok(json),
@@ -1982,7 +2576,12 @@ async fn get_user_activity(limit: Option<u32>) -> Result<String, String> {
 
 #[tauri::command]
 async fn get_network_usage(limit: Option<u32>) -> Result<String, String> {
-    match database::get_network_usage(limit) {
+    // Get user ID before retrieving data
+    let user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+    let user_id = user_id_guard.as_ref().ok_or("User ID not set")?.clone();
+    drop(user_id_guard); // Release the lock early
+
+    match database::get_network_usage(&user_id, limit) {
         Ok(usage) => {
             match serde_json::to_string(&usage) {
                 Ok(json) => Ok(json),
@@ -2012,8 +2611,29 @@ pub fn run() {
                 })
                 .build()
         })
+        .setup(|app| {
+            // Create the main window when the app starts
+            create_main_window(app.handle())?;
+
+            // Add event listener to handle window close event (x button)
+            if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Prevent the window from closing
+                        api.prevent_close();
+
+                        // Hide the window instead of closing it
+                        let _ = window_clone.hide();
+                    }
+                });
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
+            save_file_to_xampp_htdocs,
             start_screenshotting,
             stop_screenshotting,
             start_combined_recording,
@@ -2021,6 +2641,11 @@ pub fn run() {
             stop_all_processes,
             get_process_status,
             update_user_activity,
+            get_user_idle_status,
+            get_system_idle_status,
+            get_cached_idle_status,
+            start_system_idle_monitoring,
+            stop_system_idle_monitoring,
             start_idle_detection,
             stop_idle_detection,
             add_excluded_window,
@@ -2038,8 +2663,34 @@ pub fn run() {
             get_all_screenshots,
             get_recordings,
             get_user_activity,
-            get_network_usage
+            get_network_usage,
+            set_user_id,
+            get_user_id,
+            is_user_id_set,
+            create_user,
+            get_user,
+            get_all_users,
+            user_exists
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+// Function to create the main application window
+fn create_main_window(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let _main_window = tauri::webview::WebviewWindowBuilder::new(
+        app_handle,
+        "main",
+        tauri::WebviewUrl::App("index.html".into())
+    )
+    .title("Remote Worker")
+    .inner_size(900.0, 650.0)
+    .min_inner_size(800.0, 600.0)
+    .resizable(true)
+    .maximizable(true)
+    .build()
+    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+    Ok(())
+}
+

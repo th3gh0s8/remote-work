@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote Work - File Manager</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+        }
+        
+        .section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        
+        .btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        
+        .btn:hover {
+            background: #2980b9;
+        }
+        
+        .btn-success {
+            background: #2ecc71;
+        }
+        
+        .btn-success:hover {
+            background: #27ae60;
+        }
+        
+        .btn-danger {
+            background: #e74c3c;
+        }
+        
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+            background: #f8f9fa;
+        }
+        
+        .file-list {
+            margin-top: 20px;
+        }
+        
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .file-name {
+            flex-grow: 1;
+        }
+        
+        .file-actions {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .file-url {
+            color: #3498db;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Remote Work - File Manager</h1>
+        
+        <div class="section">
+            <h2>File Management</h2>
+            <p>Manage recordings and screenshots stored in XAMPP htdocs directory</p>
+            
+            <div>
+                <button id="refreshBtn" class="btn">Refresh File List</button>
+                <button id="startRecordingBtn" class="btn btn-success">Start Recording</button>
+                <button id="stopRecordingBtn" class="btn btn-danger">Stop Recording</button>
+            </div>
+            
+            <div id="status" class="status" style="display: none;"></div>
+        </div>
+        
+        <div class="section">
+            <h2>Recordings</h2>
+            <div id="recordingsList" class="file-list">
+                <p>Loading recordings...</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Screenshots</h2>
+            <div id="screenshotsList" class="file-list">
+                <p>Loading screenshots...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Check if we're in Tauri environment
+        const isTauri = typeof window.__TAURI_INTERNALS__ !== 'undefined';
+        
+        // Function to show status message
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.style.display = 'block';
+            
+            // Set color based on type
+            switch(type) {
+                case 'success':
+                    statusDiv.style.backgroundColor = '#d4edda';
+                    statusDiv.style.color = '#155724';
+                    break;
+                case 'error':
+                    statusDiv.style.backgroundColor = '#f8d7da';
+                    statusDiv.style.color = '#721c24';
+                    break;
+                default:
+                    statusDiv.style.backgroundColor = '#d1ecf1';
+                    statusDiv.style.color = '#0c5460';
+            }
+        }
+        
+        // Function to get recordings from database
+        async function loadRecordings() {
+            if (!isTauri) {
+                showStatus('Tauri not available. Run this in the Tauri application.', 'error');
+                return;
+            }
+            
+            try {
+                const recordings = await window.__TAURI__.core.invoke('get_recordings', { limit: null });
+                
+                const recordingsList = document.getElementById('recordingsList');
+                if (recordings && recordings.length > 0) {
+                    recordingsList.innerHTML = '';
+                    
+                    recordings.forEach(rec => {
+                        const itemDiv = document.createElement('div');
+                        itemDiv.className = 'file-item';
+                        
+                        // Create file info
+                        const fileInfo = document.createElement('div');
+                        fileInfo.className = 'file-name';
+                        fileInfo.innerHTML = `
+                            <strong>${rec.filename}</strong><br>
+                            <small>Size: ${(rec.file_size / 1024 / 1024).toFixed(2)} MB | Created: ${rec.created_at}</small><br>
+                            <a href="http://localhost/remote-work/recordings/${rec.filename}" class="file-url" target="_blank">
+                                http://localhost/remote-work/recordings/${rec.filename}
+                            </a>
+                        `;
+                        
+                        // Create actions
+                        const actions = document.createElement('div');
+                        actions.className = 'file-actions';
+                        actions.innerHTML = `
+                            <button class="btn" onclick="openFile('${rec.file_path}')">Open</button>
+                            <button class="btn" onclick="downloadFile('${rec.file_path}')">Download</button>
+                        `;
+                        
+                        itemDiv.appendChild(fileInfo);
+                        itemDiv.appendChild(actions);
+                        recordingsList.appendChild(itemDiv);
+                    });
+                } else {
+                    recordingsList.innerHTML = '<p>No recordings found.</p>';
+                }
+            } catch (error) {
+                console.error('Error loading recordings:', error);
+                showStatus('Error loading recordings: ' + error.message, 'error');
+            }
+        }
+        
+        // Function to get screenshots from database
+        async function loadScreenshots() {
+            if (!isTauri) {
+                showStatus('Tauri not available. Run this in the Tauri application.', 'error');
+                return;
+            }
+            
+            try {
+                const screenshots = await window.__TAURI__.core.invoke('get_all_screenshots', { limit: null });
+                
+                const screenshotsList = document.getElementById('screenshotsList');
+                if (screenshots && screenshots.length > 0) {
+                    screenshotsList.innerHTML = '';
+                    
+                    screenshots.forEach(ss => {
+                        const itemDiv = document.createElement('div');
+                        itemDiv.className = 'file-item';
+                        
+                        // Create file info
+                        const fileInfo = document.createElement('div');
+                        fileInfo.className = 'file-name';
+                        fileInfo.innerHTML = `
+                            <strong>${ss.filename}</strong><br>
+                            <small>Size: ${ss.file_size ? (ss.file_size / 1024).toFixed(2) + ' KB' : 'Unknown'} | Created: ${ss.created_at}</small><br>
+                            <a href="http://localhost/remote-work/screenshots/${ss.filename}" class="file-url" target="_blank">
+                                http://localhost/remote-work/screenshots/${ss.filename}
+                            </a>
+                        `;
+                        
+                        // Create actions
+                        const actions = document.createElement('div');
+                        actions.className = 'file-actions';
+                        actions.innerHTML = `
+                            <button class="btn" onclick="openFile('${ss.file_path}')">Open</button>
+                            <button class="btn" onclick="downloadFile('${ss.file_path}')">Download</button>
+                        `;
+                        
+                        itemDiv.appendChild(fileInfo);
+                        itemDiv.appendChild(actions);
+                        screenshotsList.appendChild(itemDiv);
+                    });
+                } else {
+                    screenshotsList.innerHTML = '<p>No screenshots found.</p>';
+                }
+            } catch (error) {
+                console.error('Error loading screenshots:', error);
+                showStatus('Error loading screenshots: ' + error.message, 'error');
+            }
+        }
+        
+        // Placeholder functions for Tauri operations
+        async function startRecording() {
+            if (!isTauri) {
+                showStatus('Tauri not available. Run this in the Tauri application.', 'error');
+                return;
+            }
+            
+            try {
+                const result = await window.__TAURI__.core.invoke('start_combined_recording');
+                showStatus('Recording started: ' + result, 'success');
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                showStatus('Error starting recording: ' + error.message, 'error');
+            }
+        }
+        
+        async function stopRecording() {
+            if (!isTauri) {
+                showStatus('Tauri not available. Run this in the Tauri application.', 'error');
+                return;
+            }
+            
+            try {
+                const result = await window.__TAURI__.core.invoke('stop_combined_recording');
+                showStatus('Recording stopped: ' + result, 'success');
+            } catch (error) {
+                console.error('Error stopping recording:', error);
+                showStatus('Error stopping recording: ' + error.message, 'error');
+            }
+        }
+        
+        // Function to refresh file lists
+        function refreshFileLists() {
+            loadRecordings();
+            loadScreenshots();
+        }
+        
+        // Set up event listeners when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('refreshBtn').addEventListener('click', refreshFileLists);
+            document.getElementById('startRecordingBtn').addEventListener('click', startRecording);
+            document.getElementById('stopRecordingBtn').addEventListener('click', stopRecording);
+            
+            // Load initial data
+            refreshFileLists();
+        });
+        
+        // Global functions for file operations
+        function openFile(filePath) {
+            window.open(filePath, '_blank');
+        }
+        
+        function downloadFile(filePath) {
+            // Create a temporary link and trigger download
+            const link = document.createElement('a');
+            link.href = filePath;
+            link.download = filePath.split('/').pop();
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    </script>
+</body>
+</html>
