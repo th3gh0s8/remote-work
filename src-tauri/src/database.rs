@@ -37,9 +37,128 @@ lazy_static! {
     };
 }
 
-// Helper function to check if database is available
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
+
+// Track the last time we attempted to connect to the database
+static LAST_CONNECT_ATTEMPT: Mutex<SystemTime> = Mutex::new(SystemTime::UNIX_EPOCH);
+
+// Helper function to check if database is available with connection validation
 pub fn is_database_available() -> bool {
+    let current_status = DATABASE_AVAILABLE.load(Ordering::SeqCst);
+
+    // If database is available according to our flag, check if connection is still valid
+    if current_status {
+        if let Some(ref pool) = *DB_POOL {
+            if let Ok(mut conn) = pool.get_conn() {
+                // Test the connection by executing a simple query
+                let result: Option<u8> = conn.query_first("SELECT 1").unwrap_or(None);
+                return result.is_some();
+            } else {
+                // If we can't get a connection, mark database as unavailable
+                DATABASE_AVAILABLE.store(false, Ordering::SeqCst);
+                return false;
+            }
+        } else {
+            // Pool is not initialized
+            DATABASE_AVAILABLE.store(false, Ordering::SeqCst);
+            return false;
+        }
+    }
+
+    // If database was not available, check if enough time has passed to try reconnection
+    // Try to reconnect every 30 seconds
+    if let Ok(last_attempt) = LAST_CONNECT_ATTEMPT.lock() {
+        if let Ok(elapsed) = last_attempt.elapsed() {
+            if elapsed > Duration::from_secs(30) {
+                // Drop the lock before attempting to reconnect
+                drop(last_attempt);
+
+                // Try to reconnect by testing a new connection
+                let db_config = DatabaseConfig::load();
+                let url = format!(
+                    "mysql://{}:{}@{}:{}/{}",
+                    db_config.user,
+                    db_config.password,
+                    db_config.host,
+                    db_config.port,
+                    db_config.database
+                );
+
+                // Test if we can connect to the database now
+                match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+                    Ok(test_pool) => {
+                        // Test with a simple connection
+                        if let Ok(mut conn) = test_pool.get_conn() {
+                            let result: Option<u8> = conn.query_first("SELECT 1").unwrap_or(None);
+                            if result.is_some() {
+                                // The database is now available!
+                                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+
+                                // Update the last connection attempt time
+                                if let Ok(mut last_attempt) = LAST_CONNECT_ATTEMPT.lock() {
+                                    *last_attempt = SystemTime::now();
+                                }
+
+                                println!("Database connection restored!");
+                                return true;
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        // Failed to create test pool, database is still not available
+                    }
+                }
+
+                // Update the last connection attempt time even on failure
+                if let Ok(mut last_attempt) = LAST_CONNECT_ATTEMPT.lock() {
+                    *last_attempt = SystemTime::now();
+                }
+            }
+        }
+    }
+
     DATABASE_AVAILABLE.load(Ordering::SeqCst)
+}
+
+// Helper function to attempt reconnection to database
+fn try_reconnect_database() {
+    let db_config = DatabaseConfig::load();
+
+    let url = format!(
+        "mysql://{}:{}@{}:{}/{}",
+        db_config.user,
+        db_config.password,
+        db_config.host,
+        db_config.port,
+        db_config.database
+    );
+
+    match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+        Ok(pool) => {
+            // Initialize database tables if they don't exist
+            initialize_database(&pool);
+
+            // The original DB_POOL is initialized with lazy_static and cannot be changed at runtime
+            // But we can at least update the availability flag to reflect that connection is now possible
+            DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+
+            // Update the last connection attempt time
+            if let Ok(mut last_attempt) = LAST_CONNECT_ATTEMPT.lock() {
+                *last_attempt = SystemTime::now();
+            }
+
+            println!("Successfully reconnected to database!");
+        },
+        Err(e) => {
+            eprintln!("Failed to reconnect to database: {}", e);
+
+            // Update the last connection attempt time even on failure
+            if let Ok(mut last_attempt) = LAST_CONNECT_ATTEMPT.lock() {
+                *last_attempt = SystemTime::now();
+            }
+        }
+    }
 }
 
 // Function to create a new user in the database
@@ -50,6 +169,7 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
         return Ok(());
     }
 
+    // Try to use the global pool, but if it's not available, try to create a direct connection
     if let Some(ref pool) = *DB_POOL {
         let mut conn = pool.get_conn()?;
 
@@ -64,7 +184,38 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
             )
         )?;
     } else {
-        eprintln!("Database pool is not available");
+        // Try to connect directly if the global pool is not available
+        let db_config = DatabaseConfig::load();
+        let url = format!(
+            "mysql://{}:{}@{}:{}/{}",
+            db_config.user,
+            db_config.password,
+            db_config.host,
+            db_config.port,
+            db_config.database
+        );
+
+        match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+            Ok(temp_pool) => {
+                let mut conn = temp_pool.get_conn()?;
+                conn.exec_drop(
+                    "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
+                    (
+                        user_id,
+                        username.unwrap_or(""),
+                        email.unwrap_or(""),
+                        username.unwrap_or(""),
+                        email.unwrap_or("")
+                    )
+                )?;
+
+                // Update the global flag to indicate database is available
+                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+            },
+            Err(_) => {
+                eprintln!("Unable to connect to database to create user");
+            }
+        }
     }
 
     Ok(())
@@ -354,28 +505,65 @@ fn initialize_database(pool: &Pool) {
 // Function to save screenshot metadata to database
 pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, filename: &str, file_size: Option<i64>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !is_database_available() {
-        // If database is not available, log and continue
-        eprintln!("Database not available, skipping screenshot metadata save");
-        return Ok(());
-    }
+        // If database is not available, try to connect directly
+        let db_config = DatabaseConfig::load();
+        let url = format!(
+            "mysql://{}:{}@{}:{}/{}",
+            db_config.user,
+            db_config.password,
+            db_config.host,
+            db_config.port,
+            db_config.database
+        );
 
-    if let Some(ref pool) = *DB_POOL {
-        let mut conn = pool.get_conn()?;
-        // Ensure user exists in the users table
-        create_user(user_id, None, None)?;
+        match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+            Ok(temp_pool) => {
+                let mut conn = temp_pool.get_conn()?;
 
-        conn.exec_drop(
-            "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
-            (
-                user_id,
-                session_id,
-                file_path,
-                filename,
-                file_size.unwrap_or(0)
-            )
-        )?;
+                // Ensure user exists in the users table
+                create_user(user_id, None, None)?;
+
+                conn.exec_drop(
+                    "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        session_id,
+                        file_path,
+                        filename,
+                        file_size.unwrap_or(0)
+                    )
+                )?;
+
+                // Update the global flag to indicate database is now available
+                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+            },
+            Err(_) => {
+                eprintln!("Unable to connect to database to save screenshot metadata");
+                // We're still returning Ok here to match the original behavior
+                // The data just won't be saved to database if MySQL is not accessible
+            }
+        }
     } else {
-        eprintln!("Database pool is not available");
+        // If database is available via global pool, use it
+        if let Some(ref pool) = *DB_POOL {
+            let mut conn = pool.get_conn()?;
+
+            // Ensure user exists in the users table
+            create_user(user_id, None, None)?;
+
+            conn.exec_drop(
+                "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    session_id,
+                    file_path,
+                    filename,
+                    file_size.unwrap_or(0)
+                )
+            )?;
+        } else {
+            eprintln!("Database pool is not available");
+        }
     }
 
     Ok(())
@@ -391,32 +579,76 @@ pub fn save_recording_to_db(
     file_size: Option<i64>
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     if !is_database_available() {
-        // If database is not available, return a placeholder ID
-        eprintln!("Database not available, skipping recording metadata save");
-        return Ok(0);
+        // If database is not available, try to connect directly
+        let db_config = DatabaseConfig::load();
+        let url = format!(
+            "mysql://{}:{}@{}:{}/{}",
+            db_config.user,
+            db_config.password,
+            db_config.host,
+            db_config.port,
+            db_config.database
+        );
+
+        match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+            Ok(temp_pool) => {
+                let mut conn = temp_pool.get_conn()?;
+
+                // Ensure user exists in the users table
+                create_user(user_id, None, None)?;
+
+                conn.exec_drop(
+                    "INSERT INTO recordings (user_id, session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        user_id,
+                        session_id,
+                        filename,
+                        file_path.unwrap_or(""),
+                        duration_seconds.unwrap_or(0),
+                        file_size.unwrap_or(0)
+                    )
+                )?;
+
+                // Get the ID of the inserted recording
+                let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
+                // Update the global flag to indicate database is now available
+                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+                Ok(id.unwrap_or(0))
+            },
+            Err(_) => {
+                eprintln!("Unable to connect to database to save recording metadata");
+                // Return a placeholder ID to match the original behavior
+                Ok(0)
+            }
+        }
+    } else {
+        // If database is available via global pool, use it
+        if let Some(ref pool) = *DB_POOL {
+            let mut conn = pool.get_conn()?;
+
+            // Ensure user exists in the users table
+            create_user(user_id, None, None)?;
+
+            conn.exec_drop(
+                "INSERT INTO recordings (user_id, session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    session_id,
+                    filename,
+                    file_path.unwrap_or(""),
+                    duration_seconds.unwrap_or(0),
+                    file_size.unwrap_or(0)
+                )
+            )?;
+
+            // Get the ID of the inserted recording
+            let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
+            Ok(id.unwrap_or(0))
+        } else {
+            eprintln!("Database pool is not available");
+            Ok(0)
+        }
     }
-
-    let pool = DB_POOL.as_ref().unwrap();
-    let mut conn = pool.get_conn()?;
-
-    // Ensure user exists in the users table
-    create_user(user_id, None, None)?;
-
-    conn.exec_drop(
-        "INSERT INTO recordings (user_id, session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            user_id,
-            session_id,
-            filename,
-            file_path.unwrap_or(""),
-            duration_seconds.unwrap_or(0),
-            file_size.unwrap_or(0)
-        )
-    )?;
-
-    // Get the ID of the inserted recording
-    let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
-    Ok(id.unwrap_or(0))
 }
 
 // Function to get recording ID by session ID
@@ -590,23 +822,51 @@ pub fn save_network_usage_to_db(
     total_uploaded: &str
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !is_database_available() {
-        // If database is not available, log and continue
-        eprintln!("Database not available, skipping network usage save");
-        return Ok(());
-    }
+        // If database is not available, try to connect directly
+        let db_config = DatabaseConfig::load();
+        let url = format!(
+            "mysql://{}:{}@{}:{}/{}",
+            db_config.user,
+            db_config.password,
+            db_config.host,
+            db_config.port,
+            db_config.database
+        );
 
-    if let Some(ref pool) = *DB_POOL {
-        let mut conn = pool.get_conn()?;
+        match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
+            Ok(temp_pool) => {
+                let mut conn = temp_pool.get_conn()?;
 
-        // Ensure user exists in the users table
-        create_user(user_id, None, None)?;
+                // Ensure user exists in the users table
+                create_user(user_id, None, None)?;
 
-        conn.exec_drop(
-            "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
-            (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
-        )?;
+                conn.exec_drop(
+                    "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
+                )?;
+
+                // Update the global flag to indicate database is now available
+                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+            },
+            Err(_) => {
+                eprintln!("Unable to connect to database to save network usage");
+            }
+        }
     } else {
-        eprintln!("Database pool is not available");
+        // If database is available via global pool, use it
+        if let Some(ref pool) = *DB_POOL {
+            let mut conn = pool.get_conn()?;
+
+            // Ensure user exists in the users table
+            create_user(user_id, None, None)?;
+
+            conn.exec_drop(
+                "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
+                (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
+            )?;
+        } else {
+            eprintln!("Database pool is not available");
+        }
     }
 
     Ok(())
