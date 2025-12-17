@@ -23,8 +23,47 @@ fn get_data_directory() -> PathBuf {
     }
 
     if cfg!(target_os = "windows") {
-        // Windows: Use XAMPP htdocs
-        PathBuf::from("C:\\xampp\\htdocs\\remote-work")
+        // Windows: Check for web server directory via environment variable first
+        if let Ok(custom_path) = std::env::var("REMOTE_WORK_WEB_DIR") {
+            let path = PathBuf::from(custom_path);
+            // Create the directory if it doesn't exist
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                eprintln!("Failed to create custom web directory: {}", e);
+                // Fallback to default behavior if custom path fails
+            } else {
+                return path;
+            }
+        }
+
+        // Check for various server environments in order of preference
+        let windows_server_paths = [
+            "C:\\xampp\\htdocs\\remote-work",    // XAMPP
+            "C:\\wamp64\\www\\remote-work",     // WAMP64 (64-bit)
+            "C:\\wamp\\www\\remote-work",       // WAMP (32-bit)
+            "C:\\laragon\\www\\remote-work",    // Laragon
+            "C:\\MAMP\\htdocs\\remote-work",    // MAMP
+        ];
+
+        for path_str in &windows_server_paths {
+            let path = PathBuf::from(path_str);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        // If none of the server directories exist, create in a fallback location
+        // Check if www directory exists (for WAMP) or htdocs (for XAMPP/MAMP)
+        let www_path = PathBuf::from("C:\\wamp64\\www\\remote-work");
+        let htdocs_path = PathBuf::from("C:\\xampp\\htdocs\\remote-work");
+
+        if www_path.parent().map_or(false, |p| p.exists()) {
+            www_path
+        } else if htdocs_path.parent().map_or(false, |p| p.exists()) {
+            htdocs_path
+        } else {
+            // If no server found, create in a general location
+            PathBuf::from("C:\\remote-work-data")
+        }
     } else {
         // Linux/macOS: Use XAMPP htdocs (check common installation locations)
         // Standard XAMPP location on Linux
@@ -102,36 +141,42 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_type: String) -> Result<String, String> {
-    use std::fs;
-    use std::path::Path;
+    // Get file size before moving the data
+    let file_size = Some(file_data.len() as i64);
 
-    // Define data directory path based on the operating system
-    let data_dir_path = get_data_directory();
+    // Upload the file to a remote server using HTTP
+    let client = reqwest::Client::new();
 
-    // Create the remote-work directory if it doesn't exist
-    fs::create_dir_all(&data_dir_path).map_err(|e| format!("Failed to create directory: {}", e))?;
+    // Get the remote server URL from environment variable or use a default
+    let remote_server_url = std::env::var("REMOTE_WORK_SERVER_URL")
+        .unwrap_or_else(|_| "http://localhost/".to_string());
 
-    // Create the subdirectory based on file type
-    let file_type_dir = data_dir_path.join(&file_type);
-    fs::create_dir_all(&file_type_dir).map_err(|e| format!("Failed to create {} directory: {}", file_type, e))?;
-
-    // Create the final file path
-    let file_path = file_type_dir.join(&filename);
-
-    // Write the file data to the specified path
-    fs::write(&file_path, file_data).map_err(|e| format!("Failed to write file: {}", e))?;
-
-    // Get user ID before saving to database
+    // Get user ID for the request
     let user_id = {
         let user_id_guard = USER_ID.lock().unwrap();
         user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-        // The guard is automatically dropped at the end of this block
     };
 
-    // Get file size
-    let file_size = std::fs::metadata(&file_path)
-        .map(|meta| Some(meta.len() as i64))
-        .unwrap_or(None);
+    // Create a multipart form for the upload
+    let form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(file_data).file_name(filename.clone()))
+        .text("user_id", user_id.clone())
+        .text("file_type", file_type.clone());
+
+    // Send the POST request to upload the file
+    let response = client
+        .post(&remote_server_url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload file to remote server: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Upload failed with status: {}", response.status()));
+    }
+
+    // Get the remote URL from the response or construct it
+    let remote_url = response.text().await.map_err(|e| format!("Failed to read response from server: {}", e))?;
 
     // Save file info to database based on file type
     match file_type.as_str() {
@@ -139,7 +184,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
             // Create a session ID for the screenshot
             let session_id = uuid::Uuid::new_v4().to_string();
 
-            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &file_path.to_string_lossy(), &filename, file_size) {
+            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id, &remote_url, &filename, file_size) {
                 eprintln!("Failed to save screenshot metadata to database: {}", e);
             }
         },
@@ -151,7 +196,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
                 &user_id,
                 &session_id,
                 &filename,
-                Some(&file_path.to_string_lossy()),
+                Some(&remote_url),
                 None, // Duration not known yet
                 file_size
             ) {
@@ -163,9 +208,8 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
         }
     }
 
-    // Return the URL where the file can be accessed
-    let file_url = format!("http://localhost/remote-work/{}/{}", file_type, filename);
-    Ok(format!("File saved successfully to: {}, accessible at: {}", file_path.to_string_lossy(), file_url))
+    // Return the URL where the file can be accessed on the remote server
+    Ok(remote_url)
 }
 
 #[tauri::command]
@@ -233,7 +277,7 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -660,7 +704,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -1304,8 +1348,20 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
         drop(task_guard);
     }
 
+    // Record "start" event in database
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_start", Some(0)) {
+        eprintln!("Failed to save idle detection start to database: {}", e);
+    }
+
     // Start the idle detection task
     let window_clone = window.clone();
+    let last_idle_save_time = Arc::new(Mutex::new(std::time::Instant::now()));
+    let last_idle_save_time_clone = last_idle_save_time.clone();
+
     let task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;  // Check every 5 seconds
@@ -1316,13 +1372,26 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
 
                     if idle_duration_seconds >= 300 {  // If idle for 5+ minutes (300 seconds)
                         window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_seconds / 60)).unwrap();
-                        // Get user ID before saving to database
                         let user_id = {
                             let user_id_guard = USER_ID.lock().unwrap();
                             user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                            // The guard is automatically dropped at the end of this block
                         };
-                        // Save idle activity to database
+
+                        // Check if 30 minutes have passed since last idle recording
+                        if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
+                            if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
+                                // Save idle activity to database
+                                if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_30min", Some(idle_duration_seconds)) {
+                                    eprintln!("Failed to save user idle activity to database: {}", e);
+                                }
+                                // Update the last save time
+                                let mut guard = last_idle_save_time_clone.lock().unwrap();
+                                *guard = std::time::Instant::now();
+                                drop(guard);
+                            }
+                        }
+
+                        // Always save general idle status regardless of interval
                         if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
                             eprintln!("Failed to save user idle activity to database: {}", e);
                         }
@@ -1332,7 +1401,6 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
                         let user_id = {
                             let user_id_guard = USER_ID.lock().unwrap();
                             user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                            // The guard is automatically dropped at the end of this block
                         };
                         // Save idle activity to database
                         if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
@@ -1344,7 +1412,6 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
                         let user_id = {
                             let user_id_guard = USER_ID.lock().unwrap();
                             user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                            // The guard is automatically dropped at the end of this block
                         };
                         // Save active activity to database
                         if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(elapsed.as_secs() as i32)) {
@@ -1372,6 +1439,15 @@ async fn stop_idle_detection() -> Result<String, String> {
     if let Some(task) = task_guard.take() {
         // Cancel the task (it will stop when it tries to sleep next)
         task.abort();
+    }
+
+    // Record "stop" event in database
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_stop", Some(0)) {
+        eprintln!("Failed to save idle detection stop to database: {}", e);
     }
 
     Ok("Idle detection stopped".to_string())
@@ -2208,11 +2284,18 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
 // Command to set user ID
 #[tauri::command]
 async fn set_user_id(user_id: String) -> Result<String, String> {
-    let mut user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
-    *user_id_guard = Some(user_id.clone());
-    drop(user_id_guard); // Release the lock early
+    // Check if the user ID exists in the database
+    if database::user_exists(&user_id).unwrap_or(false) {
+        // If user exists, just set the user ID in memory
+        let mut user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+        *user_id_guard = Some(user_id.clone());
+        drop(user_id_guard); // Release the lock early
 
-    Ok(format!("User ID set successfully: {}", user_id))
+        Ok(format!("User ID set successfully: {}", user_id))
+    } else {
+        // If user doesn't exist, return an error message
+        Err("Invalid User ID".to_string())
+    }
 }
 
 // Command to get current user ID
@@ -2656,6 +2739,8 @@ pub fn run() {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                            } else {
+                                create_main_window(app).ok();
                             }
                         }
                         "hide" => {
@@ -2676,30 +2761,58 @@ pub fn run() {
                             }
                         }
                         "quit" => {
-                            // Properly terminate all processes before quitting
-                            let app_handle = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let _ = stop_all_processes(app_handle).await;
-                            });
-
-                            // Quit the application
                             std::process::exit(0);
                         }
                         _ => {}
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                        // Toggle window visibility on left click
-                        let app_handle = tray.app_handle();
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                    match event {
+                        tauri::tray::TrayIconEvent::Click { button, .. } => {
+                            if button == tauri::tray::MouseButton::Left {
+                                let app_handle = tray.app_handle().clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                    if let Some(window) = app_handle.get_webview_window("main") {
+                                        if window.is_visible().unwrap_or(false) {
+                                            let _ = window.hide();
+                                        } else {
+                                            let _ = window.show();
+                                            let _ = window.set_focus();
+                                        }
+                                    } else {
+                                        // If window doesn't exist, create it and show it
+                                        if create_main_window(&app_handle).is_ok() {
+                                            std::thread::sleep(std::time::Duration::from_millis(100));
+                                            if let Some(window) = app_handle.get_webview_window("main") {
+                                                let _ = window.show();
+                                                let _ = window.set_focus();
+                                            }
+                                        }
+                                    }
+                                });
                             }
                         }
+                        tauri::tray::TrayIconEvent::DoubleClick { .. } => {
+                            let app_handle = tray.app_handle().clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                if let Some(window) = app_handle.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                } else {
+                                    // If window doesn't exist, create it and show it
+                                    if create_main_window(&app_handle).is_ok() {
+                                        std::thread::sleep(std::time::Duration::from_millis(100));
+                                        if let Some(window) = app_handle.get_webview_window("main") {
+                                            let _ = window.show();
+                                            let _ = window.set_focus();
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
                     }
                 })
                 .build(app)
@@ -2780,7 +2893,16 @@ pub fn run() {
 
 // Function to create the main application window
 fn create_main_window(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let _main_window = tauri::webview::WebviewWindowBuilder::new(
+    // Check if window already exists
+    if let Some(window) = app_handle.get_webview_window("main") {
+        // If window exists, just show it
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    // Create a new window only if it doesn't exist
+    let main_window = tauri::webview::WebviewWindowBuilder::new(
         app_handle,
         "main",
         tauri::WebviewUrl::App("index.html".into())
@@ -2792,6 +2914,15 @@ fn create_main_window(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::
     .maximizable(true)
     .build()
     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+    // Add the same close prevention logic to this window
+    let window_clone = main_window.clone();
+    main_window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window_clone.hide();
+        }
+    });
 
     Ok(())
 }

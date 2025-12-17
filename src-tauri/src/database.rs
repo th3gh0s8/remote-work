@@ -523,16 +523,19 @@ pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, f
                 // Ensure user exists in the users table
                 create_user(user_id, None, None)?;
 
-                conn.exec_drop(
-                    "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
+                // Insert screenshot record with detailed error handling
+                if let Err(e) = conn.exec_drop(
+                    "INSERT INTO screenshots (user_id, session_id, filename, file_path) VALUES (?, ?, ?, ?)",
                     (
                         user_id,
                         session_id,
-                        file_path,
                         filename,
-                        file_size.unwrap_or(0)
+                        file_path
                     )
-                )?;
+                ) {
+                    eprintln!("Failed to insert screenshot into database: {}", e);
+                    return Err(Box::new(e));
+                }
 
                 // Update the global flag to indicate database is now available
                 DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
@@ -551,18 +554,22 @@ pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, f
             // Ensure user exists in the users table
             create_user(user_id, None, None)?;
 
-            conn.exec_drop(
-                "INSERT INTO screenshots (user_id, session_id, file_path, filename, file_size) VALUES (?, ?, ?, ?, ?)",
+            // Insert screenshot record with detailed error handling
+            if let Err(e) = conn.exec_drop(
+                "INSERT INTO screenshots (user_id, session_id, filename, file_path) VALUES (?, ?, ?, ?)",
                 (
                     user_id,
                     session_id,
-                    file_path,
                     filename,
-                    file_size.unwrap_or(0)
+                    file_path
                 )
-            )?;
+            ) {
+                eprintln!("Failed to insert screenshot into database: {}", e);
+                return Err(Box::new(e));
+            }
         } else {
             eprintln!("Database pool is not available");
+            return Err("Database pool is not available".into());
         }
     }
 
