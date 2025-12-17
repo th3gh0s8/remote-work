@@ -11,7 +11,6 @@ use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
 use sysinfo::{Networks};
 mod database;
-use tauri::tray::MouseButton;
 
 // Global flag to track if database is available
 static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
@@ -2768,27 +2767,52 @@ pub fn run() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // Only handle left-click for toggling window visibility
-                    if let tauri::tray::TrayIconEvent::Click { button, .. } = event {
-                        if button == tauri::tray::MouseButton::Left {
-                            let app_handle = tray.app_handle();
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                if window.is_visible().unwrap_or(false) {
-                                    let _ = window.hide();
-                                } else {
-                                    let _ = window.show();
-                                    let _ = window.set_focus();
-                                }
-                            } else {
-                                // If window doesn't exist, create it and show it
-                                if create_main_window(&app_handle).is_ok() {
+                    match event {
+                        tauri::tray::TrayIconEvent::Click { button, .. } => {
+                            if button == tauri::tray::MouseButton::Left {
+                                let app_handle = tray.app_handle().clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
                                     if let Some(window) = app_handle.get_webview_window("main") {
-                                        let _ = window.show();
-                                        let _ = window.set_focus();
+                                        if window.is_visible().unwrap_or(false) {
+                                            let _ = window.hide();
+                                        } else {
+                                            let _ = window.show();
+                                            let _ = window.set_focus();
+                                        }
+                                    } else {
+                                        // If window doesn't exist, create it and show it
+                                        if create_main_window(&app_handle).is_ok() {
+                                            std::thread::sleep(std::time::Duration::from_millis(100));
+                                            if let Some(window) = app_handle.get_webview_window("main") {
+                                                let _ = window.show();
+                                                let _ = window.set_focus();
+                                            }
+                                        }
                                     }
-                                }
+                                });
                             }
                         }
+                        tauri::tray::TrayIconEvent::DoubleClick { .. } => {
+                            let app_handle = tray.app_handle().clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                if let Some(window) = app_handle.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                } else {
+                                    // If window doesn't exist, create it and show it
+                                    if create_main_window(&app_handle).is_ok() {
+                                        std::thread::sleep(std::time::Duration::from_millis(100));
+                                        if let Some(window) = app_handle.get_webview_window("main") {
+                                            let _ = window.show();
+                                            let _ = window.set_focus();
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        _ => {}
                     }
                 })
                 .build(app)
