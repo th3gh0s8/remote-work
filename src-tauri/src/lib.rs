@@ -22,68 +22,39 @@ fn get_data_directory() -> PathBuf {
         return PathBuf::from(custom_path);
     }
 
+    // Use the proper application data directory based on the operating system
     if cfg!(target_os = "windows") {
-        // Windows: Check for web server directory via environment variable first
-        if let Ok(custom_path) = std::env::var("REMOTE_WORK_WEB_DIR") {
-            let path = PathBuf::from(custom_path);
-            // Create the directory if it doesn't exist
-            if let Err(e) = std::fs::create_dir_all(&path) {
-                eprintln!("Failed to create custom web directory: {}", e);
-                // Fallback to default behavior if custom path fails
-            } else {
-                return path;
-            }
-        }
-
-        // Check for various server environments in order of preference
-        let windows_server_paths = [
-            "C:\\xampp\\htdocs\\remote-work",    // XAMPP
-            "C:\\wamp64\\www\\remote-work",     // WAMP64 (64-bit)
-            "C:\\wamp\\www\\remote-work",       // WAMP (32-bit)
-            "C:\\laragon\\www\\remote-work",    // Laragon
-            "C:\\MAMP\\htdocs\\remote-work",    // MAMP
-        ];
-
-        for path_str in &windows_server_paths {
-            let path = PathBuf::from(path_str);
-            if path.exists() {
-                return path;
-            }
-        }
-
-        // If none of the server directories exist, create in a fallback location
-        // Check if www directory exists (for WAMP) or htdocs (for XAMPP/MAMP)
-        let www_path = PathBuf::from("C:\\wamp64\\www\\remote-work");
-        let htdocs_path = PathBuf::from("C:\\xampp\\htdocs\\remote-work");
-
-        if www_path.parent().map_or(false, |p| p.exists()) {
-            www_path
-        } else if htdocs_path.parent().map_or(false, |p| p.exists()) {
-            htdocs_path
+        // On Windows, use the standard application data location
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let mut path = PathBuf::from(appdata);
+            path.push("remote-work");
+            path
         } else {
-            // If no server found, create in a general location
-            PathBuf::from("C:\\remote-work-data")
+            // Fallback if APPDATA is not set
+            PathBuf::from("C:\\Users\\Public\\remote-work-data")
+        }
+    } else if cfg!(target_os = "macos") {
+        // On macOS, use the standard application support directory
+        if let Ok(home) = std::env::var("HOME") {
+            let mut path = PathBuf::from(home);
+            path.push("Library/Application Support/remote-work");
+            path
+        } else {
+            PathBuf::from("/Users/Shared/remote-work-data")
         }
     } else {
-        // Linux/macOS: Use XAMPP htdocs (check common installation locations)
-        // Standard XAMPP location on Linux
-        let xampp_paths = [
-            "/opt/lampp/htdocs/remote-work",  // Standard XAMPP location
-            "/Applications/XAMPP/htdocs/remote-work",  // macOS XAMPP location
-            "/usr/local/xampp/htdocs/remote-work",  // Alternative location
-        ];
-
-        for path_str in &xampp_paths {
-            let path = PathBuf::from(path_str);
-            if path.exists() {
-                return path;
-            }
+        // On Linux and other Unix-like systems, use XDG standard
+        if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+            let mut path = PathBuf::from(data_home);
+            path.push("remote-work");
+            path
+        } else if let Ok(home) = std::env::var("HOME") {
+            let mut path = PathBuf::from(home);
+            path.push(".local/share/remote-work");
+            path
+        } else {
+            PathBuf::from("/tmp/remote-work-data")
         }
-
-        // Fallback to home directory if no XAMPP found
-        let mut path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
-        path.push("remote-work-data");
-        path
     }
 }
 
@@ -362,32 +333,49 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                 // Create file path
                                 let file_path = screenshots_dir.join(&filename);
 
-                                // Save image to local file
-                                if let Err(e) = img.save(&file_path) {
-                                    eprintln!("Failed to save screenshot to file: {}", e);
+                                // Save image to a temporary file first
+                                let temp_file_path = std::env::temp_dir().join(&filename);
+                                if let Err(e) = img.save(&temp_file_path) {
+                                    eprintln!("Failed to save screenshot to temp file: {}", e);
                                 } else {
-                                    // Get user ID before saving to database
-                                    let user_id = {
-                                        let user_id_guard = USER_ID.lock().unwrap();
-                                        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                                        // The guard is automatically dropped at the end of this block
+                                    // Read the image data from the temporary file
+                                    let img_data = match std::fs::read(&temp_file_path) {
+                                        Ok(data) => data,
+                                        Err(e) => {
+                                            eprintln!("Failed to read screenshot from temp file: {}", e);
+                                            return;
+                                        }
                                     };
 
-                                    // Get file size
-                                    let file_size = std::fs::metadata(&file_path)
-                                        .map(|meta| Some(meta.len() as i64))
-                                        .unwrap_or(None);
+                                    // Upload the image data to the server
+                                    match save_file_to_xampp_htdocs(img_data, filename.clone(), "screenshot".to_string()).await {
+                                        Ok(remote_url) => {
+                                            // Get user ID before saving to database
+                                            let user_id = {
+                                                let user_id_guard = USER_ID.lock().unwrap();
+                                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                                            };
 
-                                    // Ensure file_path is a string for database storage
-                                    let file_path_str = file_path.to_string_lossy().to_string();
+                                            // Get file size
+                                            let file_size = std::fs::metadata(&temp_file_path)
+                                                .map(|meta| Some(meta.len() as i64))
+                                                .unwrap_or(None);
 
-                                    // Save screenshot metadata to MySQL database
-                                    if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id_clone, &file_path_str, &filename, file_size) {
-                                        eprintln!("Failed to save screenshot metadata to database: {}", e);
-                                    } else {
-                                        // Notify that screenshot was taken
-                                        window.emit("screenshot-taken", format!("Screenshot saved to file: {}", filename)).unwrap();
+                                            // Save screenshot metadata to MySQL database with the remote URL
+                                            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id_clone, &remote_url, &filename, file_size) {
+                                                eprintln!("Failed to save screenshot metadata to database: {}", e);
+                                            } else {
+                                                // Notify that screenshot was taken
+                                                window.emit("screenshot-taken", format!("Screenshot uploaded: {}", remote_url)).unwrap();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to upload screenshot: {}", e);
+                                        }
                                     }
+
+                                    // Clean up the temporary file
+                                    let _ = std::fs::remove_file(&temp_file_path);
                                 }
                             }
                             Err(e) => {
@@ -789,39 +777,56 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                 // Create file path
                                 let file_path = screenshots_dir.join(&filename);
 
-                                // Save image to local file
-                                if let Err(e) = img.save(&file_path) {
-                                    eprintln!("Failed to save snapshot to file: {}", e);
+                                // Save image to a temporary file first
+                                let temp_file_path = std::env::temp_dir().join(&filename);
+                                if let Err(e) = img.save(&temp_file_path) {
+                                    eprintln!("Failed to save snapshot to temp file: {}", e);
                                 } else {
-                                    // Get user ID before saving to database
-                                    let user_id = {
-                                        let user_id_guard = USER_ID.lock().unwrap();
-                                        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                                        // The guard is automatically dropped at the end of this block
+                                    // Read the image data from the temporary file
+                                    let img_data = match std::fs::read(&temp_file_path) {
+                                        Ok(data) => data,
+                                        Err(e) => {
+                                            eprintln!("Failed to read snapshot from temp file: {}", e);
+                                            return;
+                                        }
                                     };
 
-                                    // Get file size
-                                    let file_size = std::fs::metadata(&file_path)
-                                        .map(|meta| Some(meta.len() as i64))
-                                        .unwrap_or(None);
+                                    // Upload the image data to the server
+                                    match save_file_to_xampp_htdocs(img_data, filename.clone(), "screenshot".to_string()).await {
+                                        Ok(remote_url) => {
+                                            // Get user ID before saving to database
+                                            let user_id = {
+                                                let user_id_guard = USER_ID.lock().unwrap();
+                                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                                            };
 
-                                    // Ensure file_path is a string for database storage
-                                    let file_path_str = file_path.to_string_lossy().to_string();
+                                            // Get file size
+                                            let file_size = std::fs::metadata(&temp_file_path)
+                                                .map(|meta| Some(meta.len() as i64))
+                                                .unwrap_or(None);
 
-                                    // Save snapshot metadata to MySQL database
-                                    if let Err(e) = database::save_screenshot_to_db(&user_id, &screenshot_session_id, &file_path_str, &filename, file_size) {
-                                        eprintln!("Failed to save snapshot metadata to database: {}", e);
-                                    } else {
-                                        // Emit to all windows for screenshot
-                                        for (_window_label, window) in app_for_screenshot.webview_windows() {
-                                            let _ = window.emit("screenshot-taken", format!("Snapshot saved to file: {}", filename));
+                                            // Save snapshot metadata to MySQL database with the remote URL
+                                            if let Err(e) = database::save_screenshot_to_db(&user_id, &screenshot_session_id, &remote_url, &filename, file_size) {
+                                                eprintln!("Failed to save snapshot metadata to database: {}", e);
+                                            } else {
+                                                // Emit to all windows for screenshot
+                                                for (_window_label, window) in app_for_screenshot.webview_windows() {
+                                                    let _ = window.emit("screenshot-taken", format!("Snapshot uploaded: {}", remote_url));
+                                                }
+                                                // Note: Keeping event name as screenshot-taken for compatibility
+                                                // Update user activity since a snapshot was just taken (user is likely active)
+                                                if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+                                                    *last_activity = SystemTime::now();
+                                                }
+                                            }
                                         }
-                                        // Note: Keeping event name as screenshot-taken for compatibility
-                                        // Update user activity since a snapshot was just taken (user is likely active)
-                                        if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
-                                            *last_activity = SystemTime::now();
+                                        Err(e) => {
+                                            eprintln!("Failed to upload snapshot: {}", e);
                                         }
                                     }
+
+                                    // Clean up the temporary file
+                                    let _ = std::fs::remove_file(&temp_file_path);
                                 }
                             }
                             Err(e) => {
