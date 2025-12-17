@@ -11,6 +11,7 @@ use tokio::io::AsyncWriteExt;
 use std::time::SystemTime;
 use sysinfo::{Networks};
 mod database;
+use tauri::tray::MouseButton;
 
 // Global flag to track if database is available
 static DATABASE_AVAILABLE: AtomicBool = AtomicBool::new(true);
@@ -2739,6 +2740,8 @@ pub fn run() {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                            } else {
+                                create_main_window(app).ok();
                             }
                         }
                         "hide" => {
@@ -2759,28 +2762,31 @@ pub fn run() {
                             }
                         }
                         "quit" => {
-                            // Properly terminate all processes before quitting
-                            let app_handle = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let _ = stop_all_processes(app_handle).await;
-                            });
-
-                            // Quit the application
                             std::process::exit(0);
                         }
                         _ => {}
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                        // Toggle window visibility on left click
-                        let app_handle = tray.app_handle();
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
+                    // Only handle left-click for toggling window visibility
+                    if let tauri::tray::TrayIconEvent::Click { button, .. } = event {
+                        if button == tauri::tray::MouseButton::Left {
+                            let app_handle = tray.app_handle();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
                             } else {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                                // If window doesn't exist, create it and show it
+                                if create_main_window(&app_handle).is_ok() {
+                                    if let Some(window) = app_handle.get_webview_window("main") {
+                                        let _ = window.show();
+                                        let _ = window.set_focus();
+                                    }
+                                }
                             }
                         }
                     }
@@ -2863,7 +2869,16 @@ pub fn run() {
 
 // Function to create the main application window
 fn create_main_window(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let _main_window = tauri::webview::WebviewWindowBuilder::new(
+    // Check if window already exists
+    if let Some(window) = app_handle.get_webview_window("main") {
+        // If window exists, just show it
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    // Create a new window only if it doesn't exist
+    let main_window = tauri::webview::WebviewWindowBuilder::new(
         app_handle,
         "main",
         tauri::WebviewUrl::App("index.html".into())
@@ -2875,6 +2890,15 @@ fn create_main_window(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std::
     .maximizable(true)
     .build()
     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+    // Add the same close prevention logic to this window
+    let window_clone = main_window.clone();
+    main_window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window_clone.hide();
+        }
+    });
 
     Ok(())
 }
