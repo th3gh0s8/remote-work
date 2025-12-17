@@ -1381,6 +1381,10 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
     let last_idle_save_time = Arc::new(Mutex::new(std::time::Instant::now()));
     let last_idle_save_time_clone = last_idle_save_time.clone();
 
+    // Track the previous user state to detect transitions
+    let prev_state = Arc::new(Mutex::new("active".to_string()));
+    let prev_state_clone = prev_state.clone();
+
     let task = tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;  // Check every 5 seconds
@@ -1389,52 +1393,80 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
                 if let Ok(elapsed) = last_activity.elapsed() {
                     let idle_duration_seconds = elapsed.as_secs() as i32;
 
+                    let current_state = if elapsed.as_secs() < 30 { "active" } else { "idle" };
+
+                    // Check if the state has changed since last check
+                    let state_changed = {
+                        let prev_state_guard = prev_state_clone.lock().unwrap();
+                        *prev_state_guard != current_state
+                    };
+
                     if idle_duration_seconds >= 300 {  // If idle for 5+ minutes (300 seconds)
                         window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_seconds / 60)).unwrap();
-                        let user_id = {
-                            let user_id_guard = USER_ID.lock().unwrap();
-                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                        };
 
-                        // Check if 30 minutes have passed since last idle recording
-                        if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
-                            if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
-                                // Save idle activity to database
-                                if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_30min", Some(idle_duration_seconds)) {
-                                    eprintln!("Failed to save user idle activity to database: {}", e);
+                        if state_changed {
+                            // Only log to database if state changed to idle
+                            let user_id = {
+                                let user_id_guard = USER_ID.lock().unwrap();
+                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            };
+
+                            // Only log idle activity if 30 minutes have passed since last idle recording
+                            if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
+                                if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
+                                    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
+                                        eprintln!("Failed to save user idle activity to database: {}", e);
+                                    }
+                                    // Update the last save time
+                                    let mut guard = last_idle_save_time_clone.lock().unwrap();
+                                    *guard = std::time::Instant::now();
+                                    drop(guard);
                                 }
-                                // Update the last save time
-                                let mut guard = last_idle_save_time_clone.lock().unwrap();
-                                *guard = std::time::Instant::now();
-                                drop(guard);
                             }
                         }
-
-                        // Always save general idle status regardless of interval
-                        if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
-                            eprintln!("Failed to save user idle activity to database: {}", e);
-                        }
-                    } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds
+                    } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds but less than 5 minutes
                         window_clone.emit("user-idle", format!("User has been idle for {} seconds", elapsed.as_secs())).unwrap();
-                        // Get user ID before saving to database
-                        let user_id = {
-                            let user_id_guard = USER_ID.lock().unwrap();
-                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                        };
-                        // Save idle activity to database
-                        if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
-                            eprintln!("Failed to save user idle activity to database: {}", e);
+
+                        if state_changed {
+                            // Only log to database if state changed to idle
+                            let user_id = {
+                                let user_id_guard = USER_ID.lock().unwrap();
+                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            };
+
+                            // Only log idle activity if 30 minutes have passed since last idle recording
+                            if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
+                                if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
+                                    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
+                                        eprintln!("Failed to save user idle activity to database: {}", e);
+                                    }
+                                    // Update the last save time
+                                    let mut guard = last_idle_save_time_clone.lock().unwrap();
+                                    *guard = std::time::Instant::now();
+                                    drop(guard);
+                                }
+                            }
                         }
                     } else {  // User is active
                         window_clone.emit("user-active", format!("User active, last activity {} seconds ago", elapsed.as_secs())).unwrap();
-                        // Get user ID before saving to database
-                        let user_id = {
-                            let user_id_guard = USER_ID.lock().unwrap();
-                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                        };
-                        // Save active activity to database
-                        if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(elapsed.as_secs() as i32)) {
-                            eprintln!("Failed to save user active activity to database: {}", e);
+
+                        if state_changed {
+                            // User became active (state changed from idle to active)
+                            let user_id = {
+                                let user_id_guard = USER_ID.lock().unwrap();
+                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            };
+                            if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(elapsed.as_secs() as i32)) {
+                                eprintln!("Failed to save user active activity to database: {}", e);
+                            }
+                        }
+                    }
+
+                    // Update the previous state if it changed
+                    if state_changed {
+                        {
+                            let mut prev_state_guard = prev_state_clone.lock().unwrap();
+                            *prev_state_guard = current_state.to_string();
                         }
                     }
                 }
