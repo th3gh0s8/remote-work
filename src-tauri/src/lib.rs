@@ -233,7 +233,7 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -660,7 +660,7 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                     if let Some(primary_screen) = screens.first() {
                         match primary_screen.capture_area(0, 0, primary_screen.display_info.width, primary_screen.display_info.height) {
                             Ok(img) => {
-                                let img = img;
+                                let mut img = img;
 
                                 // Apply window masking on Windows (with added safety checks to prevent all-black screenshots)
                                 #[cfg(target_os = "windows")]
@@ -2208,11 +2208,18 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
 // Command to set user ID
 #[tauri::command]
 async fn set_user_id(user_id: String) -> Result<String, String> {
-    let mut user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
-    *user_id_guard = Some(user_id.clone());
-    drop(user_id_guard); // Release the lock early
+    // Check if the user ID exists in the database
+    if database::user_exists(&user_id).unwrap_or(false) {
+        // If user exists, just set the user ID in memory
+        let mut user_id_guard = USER_ID.lock().map_err(|e| e.to_string())?;
+        *user_id_guard = Some(user_id.clone());
+        drop(user_id_guard); // Release the lock early
 
-    Ok(format!("User ID set successfully: {}", user_id))
+        Ok(format!("User ID set successfully: {}", user_id))
+    } else {
+        // If user doesn't exist, return an error message
+        Err("Invalid User ID".to_string())
+    }
 }
 
 // Command to get current user ID
