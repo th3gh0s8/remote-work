@@ -2629,7 +2629,109 @@ pub fn run() {
                 });
             }
 
+            // Create the system tray
+            let show_item = tauri::menu::MenuItem::with_id(app, "show", "Show", true, None::<&str>).unwrap();
+            let hide_item = tauri::menu::MenuItem::with_id(app, "hide", "Hide", true, None::<&str>).unwrap();
+            let start_monitoring_item = tauri::menu::MenuItem::with_id(app, "start_monitoring", "Start Monitoring", true, None::<&str>).unwrap();
+            let stop_monitoring_item = tauri::menu::MenuItem::with_id(app, "stop_monitoring", "Stop Monitoring", true, None::<&str>).unwrap();
+            let separator = tauri::menu::PredefinedMenuItem::separator(app).unwrap();
+            let quit_item = tauri::menu::MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).unwrap();
+
+            let tray_menu = tauri::menu::MenuBuilder::new(app)
+                .item(&show_item)
+                .item(&hide_item)
+                .item(&start_monitoring_item)
+                .item(&stop_monitoring_item)
+                .item(&separator)
+                .item(&quit_item)
+                .build()
+                .unwrap();
+
+            tauri::tray::TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&tray_menu)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "hide" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                        "start_monitoring" => {
+                            // Emit an event to start monitoring from the frontend
+                            if let Err(e) = app.emit("start-monitoring-request", ()) {
+                                eprintln!("Failed to emit start-monitoring-request: {}", e);
+                            }
+                        }
+                        "stop_monitoring" => {
+                            // Emit an event to stop monitoring from the frontend
+                            if let Err(e) = app.emit("stop-monitoring-request", ()) {
+                                eprintln!("Failed to emit stop-monitoring-request: {}", e);
+                            }
+                        }
+                        "quit" => {
+                            // Properly terminate all processes before quitting
+                            let app_handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = stop_all_processes(app_handle).await;
+                            });
+
+                            // Quit the application
+                            std::process::exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                        // Toggle window visibility on left click
+                        let app_handle = tray.app_handle();
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                            } else {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)
+                .unwrap();
+
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            match event.id.as_ref() {
+                "show" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+                "hide" => {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+                "quit" => {
+                    // Properly terminate all processes before quitting
+                    let app_handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = stop_all_processes(app_handle).await;
+                    });
+
+                    // Quit the application
+                    std::process::exit(0);
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             greet,
