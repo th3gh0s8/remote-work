@@ -589,11 +589,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Error setting up monitoring command listeners:', error);
   }
 
+  // Check the current process status to update UI accordingly
+  try {
+    const status = await invoke('get_process_status') as string;
+    console.log('Current process status:', status);
+    updateUIBasedOnStatus(status);
+  } catch (error) {
+    console.error('Error getting initial process status:', error);
+  }
+
   // Set up periodic check of cached status (every 3 seconds) to handle throttling
   setInterval(async () => {
     await updateCachedIdleStatus();
   }, 3000);  // Check every 3 seconds
 });
+
+// Function to update UI based on current process status
+function updateUIBasedOnStatus(status: string) {
+  let recordBtn: HTMLButtonElement | null = document.getElementById("record-btn") as HTMLButtonElement;
+  let stopBtn: HTMLButtonElement | null = document.getElementById("stop-btn") as HTMLButtonElement;
+  let activityBadge: HTMLElement | null = document.getElementById("activity-badge");
+
+  // Parse the status string to determine current state
+  const recordingActive = status.includes('Recording: Active');
+  const screenshottingActive = status.includes('Screenshotting: Active');
+
+  // Update UI based on recording status
+  if (recordingActive || screenshottingActive) {
+    // Show stop button and hide record button
+    if (recordBtn) recordBtn.style.display = "none";
+    if (stopBtn) {
+      stopBtn.style.display = "block";
+      stopBtn.disabled = false;
+    }
+
+    // Update activity badge to recording state
+    if (activityBadge) {
+      activityBadge.style.backgroundColor = '#2196F3'; // Blue color for recording
+      activityBadge.style.boxShadow = '0 0 10px rgba(33, 150, 243, 0.7)'; // Blue glow for recording
+    }
+  } else {
+    // Show record button and hide stop button
+    if (recordBtn) {
+      recordBtn.style.display = "block";
+      recordBtn.disabled = false;
+    }
+    if (stopBtn) stopBtn.style.display = "none";
+
+    // Update activity badge to stopped state
+    if (activityBadge) {
+      activityBadge.style.backgroundColor = '#f44336'; // Red color for stopped
+      activityBadge.style.boxShadow = '0 0 10px rgba(244, 67, 54, 0.7)'; // Red glow for stopped
+    }
+  }
+}
 
 // Add keyboard shortcuts for window control
 document.addEventListener('keydown', (event) => {

@@ -120,7 +120,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
 
     // Get the remote server URL from environment variable or use a default
     let remote_server_url = std::env::var("REMOTE_WORK_SERVER_URL")
-        .unwrap_or_else(|_| "http://localhost/".to_string());
+        .unwrap_or_else(|_| "http://localhost/remote-work/".to_string());
 
     // Get user ID for the request
     let user_id = {
@@ -904,6 +904,20 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
         *task_guard = Some(screenshot_task);
     }
 
+    // Update user activity timestamp when recording starts (user is actively starting monitoring)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording started" activity in database (user is active when starting recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording start activity to database: {}", e);
+    }
+
     Ok(format!("Remote Worker: started: (Session ID: {})", session_id))
 }
 
@@ -1353,12 +1367,12 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
         drop(task_guard);
     }
 
-    // Record "start" event in database
+    // Record "start" event in database (user is active when starting idle detection)
     let user_id = {
         let user_id_guard = USER_ID.lock().unwrap();
         user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
     };
-    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_start", Some(0)) {
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
         eprintln!("Failed to save idle detection start to database: {}", e);
     }
 
@@ -1446,12 +1460,12 @@ async fn stop_idle_detection() -> Result<String, String> {
         task.abort();
     }
 
-    // Record "stop" event in database
+    // Record "stop" event in database (user is active when stopping idle detection)
     let user_id = {
         let user_id_guard = USER_ID.lock().unwrap();
         user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
     };
-    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_stop", Some(0)) {
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
         eprintln!("Failed to save idle detection stop to database: {}", e);
     }
 
@@ -1943,6 +1957,20 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
         let _ = window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.");
     }
 
+    // Update user activity timestamp when recording stops (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording stopped" activity in database (user is active when stopping recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording stop activity to database: {}", e);
+    }
+
     match concat_result {
         Ok(msg) => Ok(format!("Combined recording stopped and {} Video file is being finalized, please wait a few seconds before opening.", msg)),
         Err(e) => Err(format!("Recording stopped but concatenation failed: {}", e)),
@@ -1978,6 +2006,20 @@ async fn stop_all_processes(app: tauri::AppHandle) -> Result<String, String> {
     match recording_result {
         Ok(msg) => results.push(format!("Recording: {}", msg)),
         Err(e) => results.push(format!("Recording error: {}", e)),
+    }
+
+    // Update user activity timestamp when all processes are stopped (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "all processes stopped" activity in database (user is active when stopping all processes)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save all processes stopped activity to database: {}", e);
     }
 
     // Notify all windows that all processes have stopped
@@ -2246,6 +2288,20 @@ async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
     // Set the paused flag
     RECORDING_PAUSED.store(true, Ordering::SeqCst);
 
+    // Update user activity timestamp when recording is paused (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording paused" activity in database (user is active when pausing recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording paused activity to database: {}", e);
+    }
+
     // Emit event to notify all UI windows
     // Emit to each active window
     for (_window_label, window) in app.webview_windows() {
@@ -2276,6 +2332,20 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
 
     // Clear the paused flag
     RECORDING_PAUSED.store(false, Ordering::SeqCst);
+
+    // Update user activity timestamp when recording is resumed (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording resumed" activity in database (user is active when resuming recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording resumed activity to database: {}", e);
+    }
 
     // Emit event to notify all UI windows
     // Emit to each active window
