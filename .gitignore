@@ -34,3 +34,4 @@ ffmpeg
 ffprobe
 *.zip    # To avoid committing temporary zip files
 QWEN.md
+remote-xwork.sql
