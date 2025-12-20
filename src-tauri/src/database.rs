@@ -173,14 +173,14 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
     if let Some(ref pool) = *DB_POOL {
         let mut conn = pool.get_conn()?;
 
+        // Just update the username and email if the RepID already exists
+        // This approach avoids issues with required fields in the salesrep table
         conn.exec_drop(
-            "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
+            "UPDATE salesrep SET username = COALESCE(?, username), repMail = COALESCE(?, repMail) WHERE RepID = ?",
             (
-                user_id,
                 username.unwrap_or(""),
                 email.unwrap_or(""),
-                username.unwrap_or(""),
-                email.unwrap_or("")
+                user_id
             )
         )?;
     } else {
@@ -198,14 +198,14 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
         match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
             Ok(temp_pool) => {
                 let mut conn = temp_pool.get_conn()?;
+                // Just update the username and email if the RepID already exists
+                // This approach avoids issues with required fields in the salesrep table
                 conn.exec_drop(
-                    "INSERT INTO users (user_id, username, email) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE username = COALESCE(?, username), email = COALESCE(?, email)",
+                    "UPDATE salesrep SET username = COALESCE(?, username), repMail = COALESCE(?, repMail) WHERE RepID = ?",
                     (
-                        user_id,
                         username.unwrap_or(""),
                         email.unwrap_or(""),
-                        username.unwrap_or(""),
-                        email.unwrap_or("")
+                        user_id
                     )
                 )?;
 
@@ -221,7 +221,7 @@ pub fn create_user(user_id: &str, username: Option<&str>, email: Option<&str>) -
     Ok(())
 }
 
-// Function to get user by user_id
+// Function to get user by user_id (from salesrep table)
 pub fn get_user(user_id: &str) -> Result<Option<UserInfo>, Box<dyn std::error::Error + Send + Sync>> {
     if !is_database_available() {
         // If database is not available, return None
@@ -234,25 +234,25 @@ pub fn get_user(user_id: &str) -> Result<Option<UserInfo>, Box<dyn std::error::E
 
     let result: Option<UserInfo> = conn
         .exec_first(
-            "SELECT id, user_id, username, email, created_at, updated_at, is_active FROM users WHERE user_id = ?",
+            "SELECT ID, RepID, username, repMail, recordDate, recordTime, Actives FROM salesrep WHERE RepID = ?",
             (user_id,)
         )?
-        .map(|(id, db_user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, bool)| {
+        .map(|(id, db_user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, String)| {
             UserInfo {
                 id,
                 user_id: db_user_id,
                 username,
                 email,
                 created_at,
-                updated_at,
-                is_active,
+                updated_at: updated_at,
+                is_active: is_active == "YES",
             }
         });
 
     Ok(result)
 }
 
-// Function to check if a user exists
+// Function to check if a user exists (in salesrep table)
 pub fn user_exists(user_id: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     if !is_database_available() {
         // If database is not available, assume user doesn't exist
@@ -264,7 +264,7 @@ pub fn user_exists(user_id: &str) -> Result<bool, Box<dyn std::error::Error + Se
     let mut conn = pool.get_conn()?;
 
     let result: Option<u32> = conn.exec_first(
-        "SELECT id FROM users WHERE user_id = ?",
+        "SELECT ID FROM salesrep WHERE RepID = ?",
         (user_id,)
     )?;
 
@@ -284,33 +284,33 @@ pub fn get_all_users(limit: Option<u32>) -> Result<Vec<UserInfo>, Box<dyn std::e
 
     if let Some(lim) = limit {
         Ok(conn.exec_map(
-            "SELECT id, user_id, username, email, created_at, updated_at, is_active FROM users ORDER BY created_at DESC LIMIT ?",
+            "SELECT ID, RepID, username, repMail, recordDate, recordTime, Actives FROM salesrep ORDER BY recordDate DESC, recordTime DESC LIMIT ?",
             (lim,),
-            |(id, user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, bool)| {
+            |(id, user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, String)| {
                 UserInfo {
                     id,
                     user_id,
                     username,
                     email,
                     created_at,
-                    updated_at,
-                    is_active,
+                    updated_at: updated_at,
+                    is_active: is_active == "YES",
                 }
             }
         )?)
     } else {
         Ok(conn.exec_map(
-            "SELECT id, user_id, username, email, created_at, updated_at, is_active FROM users ORDER BY created_at DESC",
+            "SELECT ID, RepID, username, repMail, recordDate, recordTime, Actives FROM salesrep ORDER BY recordDate DESC, recordTime DESC",
             (),
-            |(id, user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, bool)| {
+            |(id, user_id, username, email, created_at, updated_at, is_active): (u32, String, Option<String>, Option<String>, String, String, String)| {
                 UserInfo {
                     id,
                     user_id,
                     username,
                     email,
                     created_at,
-                    updated_at,
-                    is_active,
+                    updated_at: updated_at,
+                    is_active: is_active == "YES",
                 }
             }
         )?)
@@ -333,7 +333,7 @@ impl DatabaseConfig {
         let password = std::env::var("MYSQL_PASSWORD").unwrap_or_else(|_| "".to_string());
         let host = std::env::var("MYSQL_HOST").unwrap_or_else(|_| "localhost".to_string());
         let port = std::env::var("MYSQL_PORT").unwrap_or_else(|_| "3306".to_string());
-        let database = std::env::var("MYSQL_DATABASE").unwrap_or_else(|_| "remote_work_db".to_string());
+        let database = std::env::var("MYSQL_DATABASE").unwrap_or_else(|_| "remote-xwork".to_string());
 
         DatabaseConfig {
             user,
@@ -350,7 +350,7 @@ impl DatabaseConfig {
             password: "".to_string(),
             host: "localhost".to_string(),
             port: "3306".to_string(),
-            database: "remote_work_db".to_string(),
+            database: "remote-xwork".to_string(),
         }
     }
 }
@@ -359,147 +359,8 @@ impl DatabaseConfig {
 fn initialize_database(pool: &Pool) {
     let mut conn = pool.get_conn().expect("Failed to get database connection");
 
-    // Create users table first (since other tables reference it)
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(255) NOT NULL UNIQUE,
-            username VARCHAR(255),
-            email VARCHAR(255),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            is_active BOOLEAN DEFAULT TRUE,
-            INDEX idx_user_id (user_id)
-        )"
-    ) {
-        eprintln!("Failed to create users table: {}", e);
-    }
-
-    // Create screenshots table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS screenshots (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(255) NOT NULL,
-            session_id VARCHAR(255) NOT NULL,
-            image_data LONGBLOB,
-            filename VARCHAR(255) NOT NULL,
-            file_path VARCHAR(500),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            INDEX idx_user_id (user_id),
-            INDEX idx_session_id (session_id),
-            INDEX idx_created_at (created_at)
-        )"
-    ) {
-        eprintln!("Failed to create screenshots table: {}", e);
-    }
-
-    // Create recordings table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS recordings (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(255) NOT NULL,
-            session_id VARCHAR(255) NOT NULL,
-            filename VARCHAR(255) NOT NULL,
-            file_path VARCHAR(500),
-            duration_seconds INT,
-            file_size BIGINT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            INDEX idx_user_id (user_id),
-            INDEX idx_session_id (session_id),
-            INDEX idx_created_at (created_at)
-        )"
-    ) {
-        eprintln!("Failed to create recordings table: {}", e);
-    }
-
-    // Create recording segments table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS recording_segments (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(255) NOT NULL,
-            recording_id INT,
-            segment_number INT NOT NULL,
-            filename VARCHAR(255) NOT NULL,
-            file_path VARCHAR(500),
-            duration_seconds INT,
-            file_size BIGINT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
-            INDEX idx_user_id (user_id),
-            INDEX idx_recording_id (recording_id)
-        )"
-    ) {
-        eprintln!("Failed to create recording_segments table: {}", e);
-    }
-
-    // Create user_activity table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS user_activity (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(255) NOT NULL,
-            activity_type ENUM('active', 'idle') NOT NULL,
-            duration_seconds INT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            INDEX idx_user_id (user_id),
-            INDEX idx_timestamp (timestamp)
-        )"
-    ) {
-        eprintln!("Failed to create user_activity table: {}", e);
-    }
-
-    // Create network_usage table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS network_usage (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            user_id VARCHAR(255) NOT NULL,
-            download_speed VARCHAR(50),
-            upload_speed VARCHAR(50),
-            total_downloaded VARCHAR(50),
-            total_uploaded VARCHAR(50),
-            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-            INDEX idx_user_id (user_id),
-            INDEX idx_recorded_at (recorded_at)
-        )"
-    ) {
-        eprintln!("Failed to create network_usage table: {}", e);
-    }
-
-    // Create excluded_windows table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS excluded_windows (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            window_title VARCHAR(255) NOT NULL UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )"
-    ) {
-        eprintln!("Failed to create excluded_windows table: {}", e);
-    }
-
-    // Create process_status table
-    if let Err(e) = conn.query_drop(
-        "CREATE TABLE IF NOT EXISTS process_status (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            recording_active BOOLEAN DEFAULT FALSE,
-            screenshotting_active BOOLEAN DEFAULT FALSE,
-            idle_detection_active BOOLEAN DEFAULT FALSE,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        )"
-    ) {
-        eprintln!("Failed to create process_status table: {}", e);
-    }
-
-    // Insert initial process status if not exists
-    if let Err(e) = conn.query_drop(
-        "INSERT IGNORE INTO process_status (recording_active, screenshotting_active, idle_detection_active)
-         VALUES (FALSE, FALSE, FALSE)"
-    ) {
-        eprintln!("Failed to insert initial process status: {}", e);
-    }
+    // Note: Only existing tables in remote-xwork database are used
+    // The application will adapt to use the existing schema
 }
 
 // Function to save screenshot metadata to database
@@ -520,21 +381,30 @@ pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, f
             Ok(temp_pool) => {
                 let mut conn = temp_pool.get_conn()?;
 
-                // Ensure user exists in the users table
-                create_user(user_id, None, None)?;
+                // Get the salesrep ID (the primary key) from the RepID
+                let salesrep_id: Option<u32> = conn.exec_first(
+                    "SELECT ID FROM salesrep WHERE RepID = ?",
+                    (user_id,)
+                )?;
 
-                // Insert screenshot record with detailed error handling
-                if let Err(e) = conn.exec_drop(
-                    "INSERT INTO screenshots (user_id, session_id, filename, file_path) VALUES (?, ?, ?, ?)",
-                    (
-                        user_id,
-                        session_id,
-                        filename,
-                        file_path
-                    )
-                ) {
-                    eprintln!("Failed to insert screenshot into database: {}", e);
-                    return Err(Box::new(e));
+                if let Some(id) = salesrep_id {
+                    // Insert screenshot record into the web_images table which exists in remote-xwork
+                    if let Err(e) = conn.exec_drop(
+                        "INSERT INTO web_images (br_id, imgID, imgName, itmName, type, user_id, date, time, status) VALUES (?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), 'active')",
+                        (
+                            1, // Default br_id
+                            0, // imgID - using 0 as default
+                            filename,
+                            session_id, // Use session_id as item name
+                            "screenshot", // type
+                            id, // user_id
+                        )
+                    ) {
+                        eprintln!("Failed to insert screenshot into web_images table: {}", e);
+                        return Err(Box::new(e));
+                    }
+                } else {
+                    eprintln!("User with RepID {} not found in salesrep table", user_id);
                 }
 
                 // Update the global flag to indicate database is now available
@@ -551,21 +421,30 @@ pub fn save_screenshot_to_db(user_id: &str, session_id: &str, file_path: &str, f
         if let Some(ref pool) = *DB_POOL {
             let mut conn = pool.get_conn()?;
 
-            // Ensure user exists in the users table
-            create_user(user_id, None, None)?;
+            // Get the salesrep ID (the primary key) from the RepID
+            let salesrep_id: Option<u32> = conn.exec_first(
+                "SELECT ID FROM salesrep WHERE RepID = ?",
+                (user_id,)
+            )?;
 
-            // Insert screenshot record with detailed error handling
-            if let Err(e) = conn.exec_drop(
-                "INSERT INTO screenshots (user_id, session_id, filename, file_path) VALUES (?, ?, ?, ?)",
-                (
-                    user_id,
-                    session_id,
-                    filename,
-                    file_path
-                )
-            ) {
-                eprintln!("Failed to insert screenshot into database: {}", e);
-                return Err(Box::new(e));
+            if let Some(id) = salesrep_id {
+                // Insert screenshot record into the web_images table which exists in remote-xwork
+                if let Err(e) = conn.exec_drop(
+                    "INSERT INTO web_images (br_id, imgID, imgName, itmName, type, user_id, date, time, status) VALUES (?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), 'active')",
+                    (
+                        1, // Default br_id
+                        0, // imgID - using 0 as default
+                        filename,
+                        session_id, // Use session_id as item name
+                        "screenshot", // type
+                        id, // user_id
+                    )
+                ) {
+                    eprintln!("Failed to insert screenshot into web_images table: {}", e);
+                    return Err(Box::new(e));
+                }
+            } else {
+                eprintln!("User with RepID {} not found in salesrep table", user_id);
             }
         } else {
             eprintln!("Database pool is not available");
@@ -601,26 +480,34 @@ pub fn save_recording_to_db(
             Ok(temp_pool) => {
                 let mut conn = temp_pool.get_conn()?;
 
-                // Ensure user exists in the users table
-                create_user(user_id, None, None)?;
-
-                conn.exec_drop(
-                    "INSERT INTO recordings (user_id, session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        user_id,
-                        session_id,
-                        filename,
-                        file_path.unwrap_or(""),
-                        duration_seconds.unwrap_or(0),
-                        file_size.unwrap_or(0)
-                    )
+                // Get the salesrep ID (the primary key) from the RepID
+                let salesrep_id: Option<u32> = conn.exec_first(
+                    "SELECT ID FROM salesrep WHERE RepID = ?",
+                    (user_id,)
                 )?;
 
-                // Get the ID of the inserted recording
-                let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
-                // Update the global flag to indicate database is now available
-                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
-                Ok(id.unwrap_or(0))
+                if let Some(id) = salesrep_id {
+                    conn.exec_drop(
+                        "INSERT INTO web_images (br_id, imgID, imgName, itmName, type, user_id, date, time, status) VALUES (?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), 'active')",
+                        (
+                            1, // Default br_id
+                            0, // imgID - using 0 as default
+                            filename,
+                            session_id, // Use session_id as item name
+                            "recording", // type
+                            id, // user_id
+                        )
+                    )?;
+
+                    // Get the ID of the inserted recording (last inserted ID)
+                    let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
+                    // Update the global flag to indicate database is now available
+                    DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
+                    Ok(id.unwrap_or(0))
+                } else {
+                    eprintln!("User with RepID {} not found in salesrep table", user_id);
+                    Ok(0) // Return 0 as a placeholder
+                }
             },
             Err(_) => {
                 eprintln!("Unable to connect to database to save recording metadata");
@@ -633,24 +520,32 @@ pub fn save_recording_to_db(
         if let Some(ref pool) = *DB_POOL {
             let mut conn = pool.get_conn()?;
 
-            // Ensure user exists in the users table
-            create_user(user_id, None, None)?;
-
-            conn.exec_drop(
-                "INSERT INTO recordings (user_id, session_id, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    user_id,
-                    session_id,
-                    filename,
-                    file_path.unwrap_or(""),
-                    duration_seconds.unwrap_or(0),
-                    file_size.unwrap_or(0)
-                )
+            // Get the salesrep ID (the primary key) from the RepID
+            let salesrep_id: Option<u32> = conn.exec_first(
+                "SELECT ID FROM salesrep WHERE RepID = ?",
+                (user_id,)
             )?;
 
-            // Get the ID of the inserted recording
-            let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
-            Ok(id.unwrap_or(0))
+            if let Some(id) = salesrep_id {
+                conn.exec_drop(
+                    "INSERT INTO web_images (br_id, imgID, imgName, itmName, type, user_id, date, time, status) VALUES (?, ?, ?, ?, ?, ?, CURDATE(), CURTIME(), 'active')",
+                    (
+                        1, // Default br_id
+                        0, // imgID - using 0 as default
+                        filename,
+                        session_id, // Use session_id as item name
+                        "recording", // type
+                        id, // user_id
+                    )
+                )?;
+
+                // Get the ID of the inserted recording (last inserted ID)
+                let id: Option<u64> = conn.exec_first("SELECT LAST_INSERT_ID()", ())?;
+                Ok(id.unwrap_or(0))
+            } else {
+                eprintln!("User with RepID {} not found in salesrep table", user_id);
+                Ok(0) // Return 0 as a placeholder
+            }
         } else {
             eprintln!("Database pool is not available");
             Ok(0)
@@ -806,13 +701,23 @@ pub fn save_user_activity_to_db(user_id: &str, activity_type: &str, duration_sec
     if let Some(ref pool) = *DB_POOL {
         let mut conn = pool.get_conn()?;
 
-        // Ensure user exists in the users table
+        // Ensure user exists in the salesrep table
         create_user(user_id, None, None)?;
 
-        conn.exec_drop(
-            "INSERT INTO user_activity (user_id, activity_type, duration_seconds) VALUES (?, ?, ?)",
-            (user_id, activity_type, duration_seconds.unwrap_or(0))
+        // Get the salesrep ID (the primary key) from the RepID
+        let salesrep_id: Option<u32> = conn.exec_first(
+            "SELECT ID FROM salesrep WHERE RepID = ?",
+            (user_id,)
         )?;
+
+        if let Some(id) = salesrep_id {
+            conn.exec_drop(
+                "INSERT INTO user_activity (salesrepTb, activity_type, duration, rDateTime) VALUES (?, ?, ?, NOW())",
+                (id, activity_type, duration_seconds.unwrap_or(0))
+            )?;
+        } else {
+            eprintln!("User with RepID {} not found in salesrep table", user_id);
+        }
     } else {
         eprintln!("Database pool is not available");
     }
@@ -829,53 +734,22 @@ pub fn save_network_usage_to_db(
     total_uploaded: &str
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !is_database_available() {
-        // If database is not available, try to connect directly
-        let db_config = DatabaseConfig::load();
-        let url = format!(
-            "mysql://{}:{}@{}:{}/{}",
-            db_config.user,
-            db_config.password,
-            db_config.host,
-            db_config.port,
-            db_config.database
-        );
-
-        match Pool::new(Opts::from_url(&url).expect("Invalid MySQL URL")) {
-            Ok(temp_pool) => {
-                let mut conn = temp_pool.get_conn()?;
-
-                // Ensure user exists in the users table
-                create_user(user_id, None, None)?;
-
-                conn.exec_drop(
-                    "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
-                    (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
-                )?;
-
-                // Update the global flag to indicate database is now available
-                DATABASE_AVAILABLE.store(true, Ordering::SeqCst);
-            },
-            Err(_) => {
-                eprintln!("Unable to connect to database to save network usage");
-            }
-        }
-    } else {
-        // If database is available via global pool, use it
-        if let Some(ref pool) = *DB_POOL {
-            let mut conn = pool.get_conn()?;
-
-            // Ensure user exists in the users table
-            create_user(user_id, None, None)?;
-
-            conn.exec_drop(
-                "INSERT INTO network_usage (user_id, download_speed, upload_speed, total_downloaded, total_uploaded) VALUES (?, ?, ?, ?, ?)",
-                (user_id, download_speed, upload_speed, total_downloaded, total_uploaded)
-            )?;
-        } else {
-            eprintln!("Database pool is not available");
-        }
+        // If database is not available, skip saving network usage
+        eprintln!("Database not available, skipping network usage save");
+        return Ok(());
     }
 
+    // Check if network_usage table exists
+    if let Some(ref pool) = *DB_POOL {
+        let mut conn = pool.get_conn()?;
+
+        // Skip saving network usage since there's no corresponding table in remote-xwork database
+        // The remote-xwork database doesn't have a table for network usage tracking
+    } else {
+        eprintln!("Database pool is not available");
+    }
+
+    // Return Ok to maintain compatibility without actually saving
     Ok(())
 }
 
@@ -1017,38 +891,49 @@ pub fn get_all_screenshots(user_id: &str, limit: Option<u32>) -> Result<Vec<Scre
     if let Some(ref pool) = *DB_POOL {
         let mut conn = pool.get_conn()?;
 
-        if let Some(lim) = limit {
-            let result = conn.exec_map(
-                "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-                (user_id, lim),
-                |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
-                    ScreenshotData {
-                        id,
-                        session_id,
-                        file_path,
-                        filename,
-                        file_size,
-                        created_at,
+        // Get the salesrep ID (the primary key) from the RepID
+        let salesrep_id: Option<u32> = conn.exec_first(
+            "SELECT ID FROM salesrep WHERE RepID = ?",
+            (user_id,)
+        )?;
+
+        if let Some(id) = salesrep_id {
+            if let Some(lim) = limit {
+                let result = conn.exec_map(
+                    "SELECT ID, itmName, imgName, imgName, br_id, date FROM web_images WHERE user_id = ? AND type = 'screenshot' ORDER BY date DESC, time DESC LIMIT ?",
+                    (id, lim),
+                    |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, i32, String)| {
+                        ScreenshotData {
+                            id,
+                            session_id,
+                            file_path,
+                            filename,
+                            file_size: Some(file_size as i64),
+                            created_at,
+                        }
                     }
-                }
-            )?;
-            Ok(result)
+                )?;
+                Ok(result)
+            } else {
+                let result = conn.exec_map(
+                    "SELECT ID, itmName, imgName, imgName, br_id, date FROM web_images WHERE user_id = ? AND type = 'screenshot' ORDER BY date DESC, time DESC",
+                    (id,),
+                    |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, i32, String)| {
+                        ScreenshotData {
+                            id,
+                            session_id,
+                            file_path,
+                            filename,
+                            file_size: Some(file_size as i64),
+                            created_at,
+                        }
+                    }
+                )?;
+                Ok(result)
+            }
         } else {
-            let result = conn.exec_map(
-                "SELECT id, session_id, file_path, filename, file_size, created_at FROM screenshots WHERE user_id = ? ORDER BY created_at DESC",
-                (user_id,),
-                |(id, session_id, file_path, filename, file_size, created_at): (u32, String, String, String, Option<i64>, String)| {
-                    ScreenshotData {
-                        id,
-                        session_id,
-                        file_path,
-                        filename,
-                        file_size,
-                        created_at,
-                    }
-                }
-            )?;
-            Ok(result)
+            eprintln!("User with RepID {} not found in salesrep table", user_id);
+            Ok(Vec::new())
         }
     } else {
         eprintln!("Database pool is not available");
@@ -1067,40 +952,51 @@ pub fn get_recordings(user_id: &str, limit: Option<u32>) -> Result<Vec<Recording
     if let Some(ref pool) = *DB_POOL {
         let mut conn = pool.get_conn()?;
 
-        if let Some(lim) = limit {
-            let result = conn.exec_map(
-                "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-                (user_id, lim),
-                |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
-                    RecordingData {
-                        id,
-                        session_id,
-                        filename,
-                        file_path,
-                        duration_seconds,
-                        file_size,
-                        created_at,
+        // Get the salesrep ID (the primary key) from the RepID
+        let salesrep_id: Option<u32> = conn.exec_first(
+            "SELECT ID FROM salesrep WHERE RepID = ?",
+            (user_id,)
+        )?;
+
+        if let Some(id) = salesrep_id {
+            if let Some(lim) = limit {
+                let result = conn.exec_map(
+                    "SELECT ID, itmName, imgName, imgName, br_id, imgID, date FROM web_images WHERE user_id = ? AND type = 'recording' ORDER BY date DESC, time DESC LIMIT ?",
+                    (id, lim),
+                    |(id, session_id, filename, file_path, br_id, img_id, created_at): (u32, String, String, String, i32, i32, String)| {
+                        RecordingData {
+                            id,
+                            session_id,
+                            filename,
+                            file_path,
+                            duration_seconds: br_id,
+                            file_size: img_id as i64,
+                            created_at,
+                        }
                     }
-                }
-            )?;
-            Ok(result)
+                )?;
+                Ok(result)
+            } else {
+                let result = conn.exec_map(
+                    "SELECT ID, itmName, imgName, imgName, br_id, imgID, date FROM web_images WHERE user_id = ? AND type = 'recording' ORDER BY date DESC, time DESC",
+                    (id,),
+                    |(id, session_id, filename, file_path, br_id, img_id, created_at): (u32, String, String, String, i32, i32, String)| {
+                        RecordingData {
+                            id,
+                            session_id,
+                            filename,
+                            file_path,
+                            duration_seconds: br_id,
+                            file_size: img_id as i64,
+                            created_at,
+                        }
+                    }
+                )?;
+                Ok(result)
+            }
         } else {
-            let result = conn.exec_map(
-                "SELECT id, session_id, filename, file_path, duration_seconds, file_size, created_at FROM recordings WHERE user_id = ? ORDER BY created_at DESC",
-                (user_id,),
-                |(id, session_id, filename, file_path, duration_seconds, file_size, created_at): (u32, String, String, String, i32, i64, String)| {
-                    RecordingData {
-                        id,
-                        session_id,
-                        filename,
-                        file_path,
-                        duration_seconds,
-                        file_size,
-                        created_at,
-                    }
-                }
-            )?;
-            Ok(result)
+            eprintln!("User with RepID {} not found in salesrep table", user_id);
+            Ok(Vec::new())
         }
     } else {
         eprintln!("Database pool is not available");
@@ -1119,34 +1015,45 @@ pub fn get_user_activity(user_id: &str, limit: Option<u32>) -> Result<Vec<UserAc
     if let Some(ref pool) = *DB_POOL {
         let mut conn = pool.get_conn()?;
 
-        if let Some(lim) = limit {
-            let result = conn.exec_map(
-                "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-                (user_id, lim),
-                |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
-                    UserActivityData {
-                        id,
-                        activity_type,
-                        duration_seconds,
-                        timestamp,
+        // Get the salesrep ID (the primary key) from the RepID
+        let salesrep_id: Option<u32> = conn.exec_first(
+            "SELECT ID FROM salesrep WHERE RepID = ?",
+            (user_id,)
+        )?;
+
+        if let Some(id) = salesrep_id {
+            if let Some(lim) = limit {
+                let result = conn.exec_map(
+                    "SELECT ID, activity_type, duration, rDateTime FROM user_activity WHERE salesrepTb = ? ORDER BY rDateTime DESC LIMIT ?",
+                    (id, lim),
+                    |(id, activity_type, duration, timestamp): (u32, String, i32, String)| {
+                        UserActivityData {
+                            id,
+                            activity_type,
+                            duration_seconds: duration,
+                            timestamp,
+                        }
                     }
-                }
-            )?;
-            Ok(result)
+                )?;
+                Ok(result)
+            } else {
+                let result = conn.exec_map(
+                    "SELECT ID, activity_type, duration, rDateTime FROM user_activity WHERE salesrepTb = ? ORDER BY rDateTime DESC",
+                    (id,),
+                    |(id, activity_type, duration, timestamp): (u32, String, i32, String)| {
+                        UserActivityData {
+                            id,
+                            activity_type,
+                            duration_seconds: duration,
+                            timestamp,
+                        }
+                    }
+                )?;
+                Ok(result)
+            }
         } else {
-            let result = conn.exec_map(
-                "SELECT id, activity_type, duration_seconds, timestamp FROM user_activity WHERE user_id = ? ORDER BY timestamp DESC",
-                (user_id,),
-                |(id, activity_type, duration_seconds, timestamp): (u32, String, i32, String)| {
-                    UserActivityData {
-                        id,
-                        activity_type,
-                        duration_seconds,
-                        timestamp,
-                    }
-                }
-            )?;
-            Ok(result)
+            eprintln!("User with RepID {} not found in salesrep table", user_id);
+            Ok(Vec::new())
         }
     } else {
         eprintln!("Database pool is not available");

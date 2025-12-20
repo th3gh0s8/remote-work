@@ -22,68 +22,39 @@ fn get_data_directory() -> PathBuf {
         return PathBuf::from(custom_path);
     }
 
+    // Use the proper application data directory based on the operating system
     if cfg!(target_os = "windows") {
-        // Windows: Check for web server directory via environment variable first
-        if let Ok(custom_path) = std::env::var("REMOTE_WORK_WEB_DIR") {
-            let path = PathBuf::from(custom_path);
-            // Create the directory if it doesn't exist
-            if let Err(e) = std::fs::create_dir_all(&path) {
-                eprintln!("Failed to create custom web directory: {}", e);
-                // Fallback to default behavior if custom path fails
-            } else {
-                return path;
-            }
-        }
-
-        // Check for various server environments in order of preference
-        let windows_server_paths = [
-            "C:\\xampp\\htdocs\\remote-work",    // XAMPP
-            "C:\\wamp64\\www\\remote-work",     // WAMP64 (64-bit)
-            "C:\\wamp\\www\\remote-work",       // WAMP (32-bit)
-            "C:\\laragon\\www\\remote-work",    // Laragon
-            "C:\\MAMP\\htdocs\\remote-work",    // MAMP
-        ];
-
-        for path_str in &windows_server_paths {
-            let path = PathBuf::from(path_str);
-            if path.exists() {
-                return path;
-            }
-        }
-
-        // If none of the server directories exist, create in a fallback location
-        // Check if www directory exists (for WAMP) or htdocs (for XAMPP/MAMP)
-        let www_path = PathBuf::from("C:\\wamp64\\www\\remote-work");
-        let htdocs_path = PathBuf::from("C:\\xampp\\htdocs\\remote-work");
-
-        if www_path.parent().map_or(false, |p| p.exists()) {
-            www_path
-        } else if htdocs_path.parent().map_or(false, |p| p.exists()) {
-            htdocs_path
+        // On Windows, use the standard application data location
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let mut path = PathBuf::from(appdata);
+            path.push("remote-work");
+            path
         } else {
-            // If no server found, create in a general location
-            PathBuf::from("C:\\remote-work-data")
+            // Fallback if APPDATA is not set
+            PathBuf::from("C:\\Users\\Public\\remote-work-data")
+        }
+    } else if cfg!(target_os = "macos") {
+        // On macOS, use the standard application support directory
+        if let Ok(home) = std::env::var("HOME") {
+            let mut path = PathBuf::from(home);
+            path.push("Library/Application Support/remote-work");
+            path
+        } else {
+            PathBuf::from("/Users/Shared/remote-work-data")
         }
     } else {
-        // Linux/macOS: Use XAMPP htdocs (check common installation locations)
-        // Standard XAMPP location on Linux
-        let xampp_paths = [
-            "/opt/lampp/htdocs/remote-work",  // Standard XAMPP location
-            "/Applications/XAMPP/htdocs/remote-work",  // macOS XAMPP location
-            "/usr/local/xampp/htdocs/remote-work",  // Alternative location
-        ];
-
-        for path_str in &xampp_paths {
-            let path = PathBuf::from(path_str);
-            if path.exists() {
-                return path;
-            }
+        // On Linux and other Unix-like systems, use XDG standard
+        if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+            let mut path = PathBuf::from(data_home);
+            path.push("remote-work");
+            path
+        } else if let Ok(home) = std::env::var("HOME") {
+            let mut path = PathBuf::from(home);
+            path.push(".local/share/remote-work");
+            path
+        } else {
+            PathBuf::from("/tmp/remote-work-data")
         }
-
-        // Fallback to home directory if no XAMPP found
-        let mut path = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
-        path.push("remote-work-data");
-        path
     }
 }
 
@@ -149,7 +120,7 @@ async fn save_file_to_xampp_htdocs(file_data: Vec<u8>, filename: String, file_ty
 
     // Get the remote server URL from environment variable or use a default
     let remote_server_url = std::env::var("REMOTE_WORK_SERVER_URL")
-        .unwrap_or_else(|_| "http://localhost/".to_string());
+        .unwrap_or_else(|_| "http://localhost/remote-work/".to_string());
 
     // Get user ID for the request
     let user_id = {
@@ -362,32 +333,49 @@ async fn start_screenshotting(window: tauri::Window) -> Result<String, String> {
                                 // Create file path
                                 let file_path = screenshots_dir.join(&filename);
 
-                                // Save image to local file
-                                if let Err(e) = img.save(&file_path) {
-                                    eprintln!("Failed to save screenshot to file: {}", e);
+                                // Save image to a temporary file first
+                                let temp_file_path = std::env::temp_dir().join(&filename);
+                                if let Err(e) = img.save(&temp_file_path) {
+                                    eprintln!("Failed to save screenshot to temp file: {}", e);
                                 } else {
-                                    // Get user ID before saving to database
-                                    let user_id = {
-                                        let user_id_guard = USER_ID.lock().unwrap();
-                                        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                                        // The guard is automatically dropped at the end of this block
+                                    // Read the image data from the temporary file
+                                    let img_data = match std::fs::read(&temp_file_path) {
+                                        Ok(data) => data,
+                                        Err(e) => {
+                                            eprintln!("Failed to read screenshot from temp file: {}", e);
+                                            return;
+                                        }
                                     };
 
-                                    // Get file size
-                                    let file_size = std::fs::metadata(&file_path)
-                                        .map(|meta| Some(meta.len() as i64))
-                                        .unwrap_or(None);
+                                    // Upload the image data to the server
+                                    match save_file_to_xampp_htdocs(img_data, filename.clone(), "screenshot".to_string()).await {
+                                        Ok(remote_url) => {
+                                            // Get user ID before saving to database
+                                            let user_id = {
+                                                let user_id_guard = USER_ID.lock().unwrap();
+                                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                                            };
 
-                                    // Ensure file_path is a string for database storage
-                                    let file_path_str = file_path.to_string_lossy().to_string();
+                                            // Get file size
+                                            let file_size = std::fs::metadata(&temp_file_path)
+                                                .map(|meta| Some(meta.len() as i64))
+                                                .unwrap_or(None);
 
-                                    // Save screenshot metadata to MySQL database
-                                    if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id_clone, &file_path_str, &filename, file_size) {
-                                        eprintln!("Failed to save screenshot metadata to database: {}", e);
-                                    } else {
-                                        // Notify that screenshot was taken
-                                        window.emit("screenshot-taken", format!("Screenshot saved to file: {}", filename)).unwrap();
+                                            // Save screenshot metadata to MySQL database with the remote URL
+                                            if let Err(e) = database::save_screenshot_to_db(&user_id, &session_id_clone, &remote_url, &filename, file_size) {
+                                                eprintln!("Failed to save screenshot metadata to database: {}", e);
+                                            } else {
+                                                // Notify that screenshot was taken
+                                                window.emit("screenshot-taken", format!("Screenshot uploaded: {}", remote_url)).unwrap();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to upload screenshot: {}", e);
+                                        }
                                     }
+
+                                    // Clean up the temporary file
+                                    let _ = std::fs::remove_file(&temp_file_path);
                                 }
                             }
                             Err(e) => {
@@ -789,39 +777,56 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
                                 // Create file path
                                 let file_path = screenshots_dir.join(&filename);
 
-                                // Save image to local file
-                                if let Err(e) = img.save(&file_path) {
-                                    eprintln!("Failed to save snapshot to file: {}", e);
+                                // Save image to a temporary file first
+                                let temp_file_path = std::env::temp_dir().join(&filename);
+                                if let Err(e) = img.save(&temp_file_path) {
+                                    eprintln!("Failed to save snapshot to temp file: {}", e);
                                 } else {
-                                    // Get user ID before saving to database
-                                    let user_id = {
-                                        let user_id_guard = USER_ID.lock().unwrap();
-                                        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                                        // The guard is automatically dropped at the end of this block
+                                    // Read the image data from the temporary file
+                                    let img_data = match std::fs::read(&temp_file_path) {
+                                        Ok(data) => data,
+                                        Err(e) => {
+                                            eprintln!("Failed to read snapshot from temp file: {}", e);
+                                            return;
+                                        }
                                     };
 
-                                    // Get file size
-                                    let file_size = std::fs::metadata(&file_path)
-                                        .map(|meta| Some(meta.len() as i64))
-                                        .unwrap_or(None);
+                                    // Upload the image data to the server
+                                    match save_file_to_xampp_htdocs(img_data, filename.clone(), "screenshot".to_string()).await {
+                                        Ok(remote_url) => {
+                                            // Get user ID before saving to database
+                                            let user_id = {
+                                                let user_id_guard = USER_ID.lock().unwrap();
+                                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                                            };
 
-                                    // Ensure file_path is a string for database storage
-                                    let file_path_str = file_path.to_string_lossy().to_string();
+                                            // Get file size
+                                            let file_size = std::fs::metadata(&temp_file_path)
+                                                .map(|meta| Some(meta.len() as i64))
+                                                .unwrap_or(None);
 
-                                    // Save snapshot metadata to MySQL database
-                                    if let Err(e) = database::save_screenshot_to_db(&user_id, &screenshot_session_id, &file_path_str, &filename, file_size) {
-                                        eprintln!("Failed to save snapshot metadata to database: {}", e);
-                                    } else {
-                                        // Emit to all windows for screenshot
-                                        for (_window_label, window) in app_for_screenshot.webview_windows() {
-                                            let _ = window.emit("screenshot-taken", format!("Snapshot saved to file: {}", filename));
+                                            // Save snapshot metadata to MySQL database with the remote URL
+                                            if let Err(e) = database::save_screenshot_to_db(&user_id, &screenshot_session_id, &remote_url, &filename, file_size) {
+                                                eprintln!("Failed to save snapshot metadata to database: {}", e);
+                                            } else {
+                                                // Emit to all windows for screenshot
+                                                for (_window_label, window) in app_for_screenshot.webview_windows() {
+                                                    let _ = window.emit("screenshot-taken", format!("Snapshot uploaded: {}", remote_url));
+                                                }
+                                                // Note: Keeping event name as screenshot-taken for compatibility
+                                                // Update user activity since a snapshot was just taken (user is likely active)
+                                                if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+                                                    *last_activity = SystemTime::now();
+                                                }
+                                            }
                                         }
-                                        // Note: Keeping event name as screenshot-taken for compatibility
-                                        // Update user activity since a snapshot was just taken (user is likely active)
-                                        if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
-                                            *last_activity = SystemTime::now();
+                                        Err(e) => {
+                                            eprintln!("Failed to upload snapshot: {}", e);
                                         }
                                     }
+
+                                    // Clean up the temporary file
+                                    let _ = std::fs::remove_file(&temp_file_path);
                                 }
                             }
                             Err(e) => {
@@ -897,6 +902,20 @@ async fn start_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
     {
         let mut task_guard = SCREENSHOT_TASK_HANDLE.lock().unwrap();
         *task_guard = Some(screenshot_task);
+    }
+
+    // Update user activity timestamp when recording starts (user is actively starting monitoring)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording started" activity in database (user is active when starting recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording start activity to database: {}", e);
     }
 
     Ok(format!("Remote Worker: started: (Session ID: {})", session_id))
@@ -1348,12 +1367,12 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
         drop(task_guard);
     }
 
-    // Record "start" event in database
+    // Record "start" event in database (user is active when starting idle detection)
     let user_id = {
         let user_id_guard = USER_ID.lock().unwrap();
         user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
     };
-    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_start", Some(0)) {
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
         eprintln!("Failed to save idle detection start to database: {}", e);
     }
 
@@ -1361,6 +1380,10 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
     let window_clone = window.clone();
     let last_idle_save_time = Arc::new(Mutex::new(std::time::Instant::now()));
     let last_idle_save_time_clone = last_idle_save_time.clone();
+
+    // Track the previous user state to detect transitions
+    let prev_state = Arc::new(Mutex::new("active".to_string()));
+    let prev_state_clone = prev_state.clone();
 
     let task = tokio::spawn(async move {
         loop {
@@ -1370,52 +1393,80 @@ async fn start_idle_detection(window: tauri::Window) -> Result<String, String> {
                 if let Ok(elapsed) = last_activity.elapsed() {
                     let idle_duration_seconds = elapsed.as_secs() as i32;
 
+                    let current_state = if elapsed.as_secs() < 30 { "active" } else { "idle" };
+
+                    // Check if the state has changed since last check
+                    let state_changed = {
+                        let prev_state_guard = prev_state_clone.lock().unwrap();
+                        *prev_state_guard != current_state
+                    };
+
                     if idle_duration_seconds >= 300 {  // If idle for 5+ minutes (300 seconds)
                         window_clone.emit("user-idle", format!("User has been idle for {} minutes", idle_duration_seconds / 60)).unwrap();
-                        let user_id = {
-                            let user_id_guard = USER_ID.lock().unwrap();
-                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                        };
 
-                        // Check if 30 minutes have passed since last idle recording
-                        if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
-                            if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
-                                // Save idle activity to database
-                                if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_30min", Some(idle_duration_seconds)) {
-                                    eprintln!("Failed to save user idle activity to database: {}", e);
+                        if state_changed {
+                            // Only log to database if state changed to idle
+                            let user_id = {
+                                let user_id_guard = USER_ID.lock().unwrap();
+                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            };
+
+                            // Only log idle activity if 30 minutes have passed since last idle recording
+                            if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
+                                if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
+                                    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
+                                        eprintln!("Failed to save user idle activity to database: {}", e);
+                                    }
+                                    // Update the last save time
+                                    let mut guard = last_idle_save_time_clone.lock().unwrap();
+                                    *guard = std::time::Instant::now();
+                                    drop(guard);
                                 }
-                                // Update the last save time
-                                let mut guard = last_idle_save_time_clone.lock().unwrap();
-                                *guard = std::time::Instant::now();
-                                drop(guard);
                             }
                         }
-
-                        // Always save general idle status regardless of interval
-                        if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
-                            eprintln!("Failed to save user idle activity to database: {}", e);
-                        }
-                    } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds
+                    } else if elapsed.as_secs() >= 30 {  // If idle for 30+ seconds but less than 5 minutes
                         window_clone.emit("user-idle", format!("User has been idle for {} seconds", elapsed.as_secs())).unwrap();
-                        // Get user ID before saving to database
-                        let user_id = {
-                            let user_id_guard = USER_ID.lock().unwrap();
-                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                        };
-                        // Save idle activity to database
-                        if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
-                            eprintln!("Failed to save user idle activity to database: {}", e);
+
+                        if state_changed {
+                            // Only log to database if state changed to idle
+                            let user_id = {
+                                let user_id_guard = USER_ID.lock().unwrap();
+                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            };
+
+                            // Only log idle activity if 30 minutes have passed since last idle recording
+                            if let Ok(last_save_guard) = last_idle_save_time_clone.lock() {
+                                if last_save_guard.elapsed().as_secs() >= 1800 { // 30 minutes = 1800 seconds
+                                    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle", Some(idle_duration_seconds)) {
+                                        eprintln!("Failed to save user idle activity to database: {}", e);
+                                    }
+                                    // Update the last save time
+                                    let mut guard = last_idle_save_time_clone.lock().unwrap();
+                                    *guard = std::time::Instant::now();
+                                    drop(guard);
+                                }
+                            }
                         }
                     } else {  // User is active
                         window_clone.emit("user-active", format!("User active, last activity {} seconds ago", elapsed.as_secs())).unwrap();
-                        // Get user ID before saving to database
-                        let user_id = {
-                            let user_id_guard = USER_ID.lock().unwrap();
-                            user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
-                        };
-                        // Save active activity to database
-                        if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(elapsed.as_secs() as i32)) {
-                            eprintln!("Failed to save user active activity to database: {}", e);
+
+                        if state_changed {
+                            // User became active (state changed from idle to active)
+                            let user_id = {
+                                let user_id_guard = USER_ID.lock().unwrap();
+                                user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+                            };
+                            if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(elapsed.as_secs() as i32)) {
+                                eprintln!("Failed to save user active activity to database: {}", e);
+                            }
+                        }
+                    }
+
+                    // Update the previous state if it changed
+                    if state_changed {
+                        {
+                            let mut prev_state_guard = prev_state_clone.lock().unwrap();
+                            *prev_state_guard = current_state.to_string();
                         }
                     }
                 }
@@ -1441,12 +1492,12 @@ async fn stop_idle_detection() -> Result<String, String> {
         task.abort();
     }
 
-    // Record "stop" event in database
+    // Record "stop" event in database (user is active when stopping idle detection)
     let user_id = {
         let user_id_guard = USER_ID.lock().unwrap();
         user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
     };
-    if let Err(e) = database::save_user_activity_to_db(&user_id, "idle_stop", Some(0)) {
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
         eprintln!("Failed to save idle detection stop to database: {}", e);
     }
 
@@ -1938,6 +1989,20 @@ async fn stop_combined_recording(app: tauri::AppHandle) -> Result<String, String
         let _ = window.emit("recording-finished", "Combined recording stopped. Video file is being finalized, please wait a few seconds before opening.");
     }
 
+    // Update user activity timestamp when recording stops (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording stopped" activity in database (user is active when stopping recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording stop activity to database: {}", e);
+    }
+
     match concat_result {
         Ok(msg) => Ok(format!("Combined recording stopped and {} Video file is being finalized, please wait a few seconds before opening.", msg)),
         Err(e) => Err(format!("Recording stopped but concatenation failed: {}", e)),
@@ -1973,6 +2038,20 @@ async fn stop_all_processes(app: tauri::AppHandle) -> Result<String, String> {
     match recording_result {
         Ok(msg) => results.push(format!("Recording: {}", msg)),
         Err(e) => results.push(format!("Recording error: {}", e)),
+    }
+
+    // Update user activity timestamp when all processes are stopped (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "all processes stopped" activity in database (user is active when stopping all processes)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save all processes stopped activity to database: {}", e);
     }
 
     // Notify all windows that all processes have stopped
@@ -2241,6 +2320,20 @@ async fn pause_combined_recording(app: tauri::AppHandle) -> Result<String, Strin
     // Set the paused flag
     RECORDING_PAUSED.store(true, Ordering::SeqCst);
 
+    // Update user activity timestamp when recording is paused (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording paused" activity in database (user is active when pausing recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording paused activity to database: {}", e);
+    }
+
     // Emit event to notify all UI windows
     // Emit to each active window
     for (_window_label, window) in app.webview_windows() {
@@ -2271,6 +2364,20 @@ async fn resume_combined_recording(app: tauri::AppHandle) -> Result<String, Stri
 
     // Clear the paused flag
     RECORDING_PAUSED.store(false, Ordering::SeqCst);
+
+    // Update user activity timestamp when recording is resumed (user is actively managing the system)
+    if let Ok(mut last_activity) = LAST_USER_ACTIVITY.lock() {
+        *last_activity = SystemTime::now();
+    }
+
+    // Record "recording resumed" activity in database (user is active when resuming recording)
+    let user_id = {
+        let user_id_guard = USER_ID.lock().unwrap();
+        user_id_guard.as_ref().unwrap_or(&"unknown".to_string()).clone()
+    };
+    if let Err(e) = database::save_user_activity_to_db(&user_id, "active", Some(0)) {
+        eprintln!("Failed to save recording resumed activity to database: {}", e);
+    }
 
     // Emit event to notify all UI windows
     // Emit to each active window
