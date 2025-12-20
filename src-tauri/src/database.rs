@@ -582,34 +582,9 @@ pub fn save_recording_segment_to_db(
     duration_seconds: Option<i32>,
     file_size: Option<i64>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if !is_database_available() {
-        // If database is not available, log and continue
-        eprintln!("Database not available, skipping recording segment save");
-        return Ok(());
-    }
-
-    if let Some(ref pool) = *DB_POOL {
-        let mut conn = pool.get_conn()?;
-
-        // Ensure user exists in the users table
-        create_user(user_id, None, None)?;
-
-        conn.exec_drop(
-            "INSERT INTO recording_segments (user_id, recording_id, segment_number, filename, file_path, duration_seconds, file_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                user_id,
-                recording_id,
-                segment_number,
-                filename,
-                file_path.unwrap_or(""),
-                duration_seconds.unwrap_or(0),
-                file_size.unwrap_or(0)
-            )
-        )?;
-    } else {
-        eprintln!("Database pool is not available");
-    }
-
+    // Skip saving recording segments since the recording_segments table doesn't exist in remote-xwork database
+    // The remote-xwork database doesn't have a table for recording segments
+    eprintln!("Skipping recording segment save - recording_segments table not available in remote-xwork database");
     Ok(())
 }
 
@@ -621,72 +596,9 @@ pub fn update_recording_metadata_in_db(
     duration_seconds: Option<i32>,
     file_size: Option<i64>
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if !is_database_available() {
-        // If database is not available, log and continue
-        eprintln!("Database not available, skipping recording metadata update");
-        return Ok(());
-    }
-
-    if let Some(ref pool) = *DB_POOL {
-        let mut conn = pool.get_conn()?;
-
-        let query = if final_file_path.is_some() && final_filename.is_some() {
-            "UPDATE recordings SET filename = ?, file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
-        } else if final_file_path.is_some() {
-            "UPDATE recordings SET file_path = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
-        } else if final_filename.is_some() {
-            "UPDATE recordings SET filename = ?, duration_seconds = ?, file_size = ? WHERE session_id = ?"
-        } else {
-            "UPDATE recordings SET duration_seconds = ?, file_size = ? WHERE session_id = ?"
-        };
-
-        let result = if final_file_path.is_some() && final_filename.is_some() {
-            conn.exec_drop(
-                query,
-                (
-                    final_filename.unwrap(),
-                    final_file_path.unwrap(),
-                    duration_seconds.unwrap_or(0),
-                    file_size.unwrap_or(0),
-                    session_id
-                )
-            )
-        } else if final_file_path.is_some() {
-            conn.exec_drop(
-                query,
-                (
-                    final_file_path.unwrap(),
-                    duration_seconds.unwrap_or(0),
-                    file_size.unwrap_or(0),
-                    session_id
-                )
-            )
-        } else if final_filename.is_some() {
-            conn.exec_drop(
-                query,
-                (
-                    final_filename.unwrap(),
-                    duration_seconds.unwrap_or(0),
-                    file_size.unwrap_or(0),
-                    session_id
-                )
-            )
-        } else {
-            conn.exec_drop(
-                query,
-                (
-                    duration_seconds.unwrap_or(0),
-                    file_size.unwrap_or(0),
-                    session_id
-                )
-            )
-        };
-
-        result?;
-    } else {
-        eprintln!("Database pool is not available");
-    }
-
+    // Skip updating recording metadata since the recordings table doesn't exist in remote-xwork database
+    // The remote-xwork database doesn't have a table for recordings
+    eprintln!("Skipping recording metadata update - recordings table not available in remote-xwork database");
     Ok(())
 }
 
